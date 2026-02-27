@@ -1,12 +1,22 @@
 // ═══ Live data fetcher: Hyperliquid + Polymarket → Asset[] ═══
 
-import type { Asset, Bet, PricePoint, OddsPoint } from "../types";
-import { SEED, initAssets, genPriceHistory, genOddsHistory } from "./dataProvider";
-import { MARKET_MAPPINGS, extractThreshold } from "./marketMapping";
+import type { Asset, Bet, PricePoint, OddsPoint, FundingPoint } from "../types";
+import { SEED, initAssets, genPriceHistory, genOddsHistory, genFundingHistory } from "./dataProvider";
+import { PRIORITY_MAPPINGS, buildAssetList, extractThreshold } from "./marketMapping";
+import type { MarketMapping } from "./marketMapping";
 
 // ── Hyperliquid fetchers ──
 
-async function fetchHLMeta(): Promise<{ names: string[]; prices: Record<string, number> }> {
+interface HLMeta {
+  names: string[];
+  prices: Record<string, number>;
+  funding: Record<string, number>;
+  openInterest: Record<string, number>;
+  dayVolume: Record<string, number>;
+  premium: Record<string, number>;
+}
+
+async function fetchHLMeta(): Promise<HLMeta> {
   var res = await fetch("/api/hyperliquid", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -14,22 +24,29 @@ async function fetchHLMeta(): Promise<{ names: string[]; prices: Record<string, 
   });
   if (!res.ok) throw new Error("HL meta " + res.status);
   var data = await res.json();
-  // Response is [meta, assetCtxs] where meta.universe[i].name matches assetCtxs[i]
   var meta = data[0];
   var ctxs = data[1];
   var names: string[] = [];
   var prices: Record<string, number> = {};
+  var funding: Record<string, number> = {};
+  var openInterest: Record<string, number> = {};
+  var dayVolume: Record<string, number> = {};
+  var premium: Record<string, number> = {};
   for (var i = 0; i < meta.universe.length; i++) {
     var name = meta.universe[i].name;
     names.push(name);
-    prices[name] = parseFloat(ctxs[i].markPx);
+    prices[name] = parseFloat(ctxs[i].markPx || "0");
+    funding[name] = parseFloat(ctxs[i].funding || "0");
+    openInterest[name] = parseFloat(ctxs[i].openInterest || "0");
+    dayVolume[name] = parseFloat(ctxs[i].dayNtlVlm || "0");
+    premium[name] = parseFloat(ctxs[i].premium || "0");
   }
-  return { names: names, prices: prices };
+  return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
 }
 
 async function fetchHLCandles(coin: string): Promise<PricePoint[]> {
   var endTime = Date.now();
-  var startTime = endTime - 7 * 24 * 60 * 60 * 1000; // 7 days
+  var startTime = endTime - 7 * 24 * 60 * 60 * 1000;
   var res = await fetch("/api/hyperliquid", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -46,13 +63,30 @@ async function fetchHLCandles(coin: string): Promise<PricePoint[]> {
   });
 }
 
+async function fetchHLFundingHistory(coin: string): Promise<FundingPoint[]> {
+  var endTime = Date.now();
+  var startTime = endTime - 7 * 24 * 60 * 60 * 1000;
+  var res = await fetch("/api/hyperliquid", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "fundingHistory", coin: coin, startTime: startTime }),
+  });
+  if (!res.ok) throw new Error("HL funding history " + res.status);
+  var data = await res.json();
+  if (!Array.isArray(data) || data.length === 0) return [];
+  return data.map(function(d: any) {
+    var rate = parseFloat(d.fundingRate || "0");
+    return { t: d.time, rate: rate, apr: rate * 8760, premium: parseFloat(d.premium || "0") };
+  });
+}
+
 // ── Polymarket fetchers ──
 
 interface PMMarket {
   id: string;
   question: string;
-  outcomePrices: string;     // JSON string: '["0.55","0.45"]'
-  clobTokenIds: string;      // JSON string: '["yes_id","no_id"]'
+  outcomePrices: string;
+  clobTokenIds: string;
   volume: string;
   active: boolean;
   slug?: string;
@@ -74,7 +108,7 @@ async function fetchPMEvents(searchTerm: string): Promise<PMEvent[]> {
 
 async function fetchPMOddsHistory(tokenId: string): Promise<OddsPoint[]> {
   var endTs = Math.floor(Date.now() / 1000);
-  var startTs = endTs - 7 * 24 * 60 * 60; // 7 days
+  var startTs = endTs - 7 * 24 * 60 * 60;
   var res = await fetch("/api/polymarket?endpoint=prices-history&market=" + tokenId + "&startTs=" + startTs + "&endTs=" + endTs + "&fidelity=60");
   if (!res.ok) throw new Error("PM history " + res.status);
   var data = await res.json();
@@ -103,7 +137,6 @@ function matchEventsToAsset(events: PMEvent[], searchTerms: string[]): PMMarket[
       }
     }
   }
-  // Sort by volume descending, take top 5
   matched.sort(function(a, b) { return parseFloat(b.volume || "0") - parseFloat(a.volume || "0"); });
   return matched.slice(0, 5);
 }
@@ -123,8 +156,8 @@ function marketToBet(mkt: PMMarket, idx: number): Bet | null {
       th: extractThreshold(mkt.question),
       url: "polymarket.com/event/" + (mkt.slug || mkt.id),
       currentOdds: currentOdds,
-      oddsHistory: [],       // Filled in later
-      _tokenId: tokenIds[0], // YES token for history fetch
+      oddsHistory: [],
+      _tokenId: tokenIds[0],
     } as any;
   } catch {
     return null;
@@ -136,25 +169,37 @@ function marketToBet(mkt: PMMarket, idx: number): Bet | null {
 export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: number }> {
   var liveCount = 0;
 
-  // Step 1: Fetch Hyperliquid prices
-  var hlPrices: Record<string, number> = {};
+  // Step 1: Fetch Hyperliquid meta (prices + funding + volume + OI)
+  var hlMeta: HLMeta = { names: [], prices: {}, funding: {}, openInterest: {}, dayVolume: {}, premium: {} };
   try {
-    var hlMeta = await fetchHLMeta();
-    hlPrices = hlMeta.prices;
+    hlMeta = await fetchHLMeta();
   } catch (e) {
-    console.warn("Hyperliquid meta failed, using SEED prices:", e);
+    console.warn("Hyperliquid meta failed, using SEED:", e);
   }
 
-  // Step 2: Build assets in parallel
-  var assetPromises = MARKET_MAPPINGS.map(async function(mapping) {
+  // Step 2: Build dynamic asset list (priority + discovered high-funding/volume perps)
+  var mappings: MarketMapping[];
+  if (hlMeta.names.length > 0) {
+    mappings = buildAssetList(hlMeta.names, hlMeta.funding, hlMeta.dayVolume, hlMeta.openInterest);
+  } else {
+    mappings = PRIORITY_MAPPINGS;
+  }
+
+  // Step 3: Build assets in parallel
+  var assetPromises = mappings.map(async function(mapping) {
     var seedAsset = SEED.find(function(s) { return s.sym === mapping.sym; });
-    var currentPrice = hlPrices[mapping.sym] || (seedAsset ? seedAsset.pr : 0);
+    var currentPrice = hlMeta.prices[mapping.sym] || (seedAsset ? seedAsset.pr : 0);
     if (!currentPrice) return null;
+
+    var fundingRate = hlMeta.funding[mapping.sym] || (seedAsset ? (seedAsset.fundingRate || 0) : 0);
+    var oi = hlMeta.openInterest[mapping.sym] || (seedAsset ? (seedAsset.openInterest || 0) : 0);
+    var vol = hlMeta.dayVolume[mapping.sym] || (seedAsset ? (seedAsset.dayNtlVlm || 0) : 0);
+    var prem = hlMeta.premium[mapping.sym] || 0;
 
     // Fetch candle history
     var priceHistory: PricePoint[];
     var priceIsLive = false;
-    if (mapping.hasPerp && hlPrices[mapping.sym]) {
+    if (mapping.hasPerp && hlMeta.prices[mapping.sym]) {
       try {
         priceHistory = await fetchHLCandles(mapping.sym);
         priceIsLive = true;
@@ -163,6 +208,18 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       }
     } else {
       priceHistory = genPriceHistory(currentPrice, currentPrice * 0.01);
+    }
+
+    // Fetch funding history (only for perps with meaningful funding)
+    var fundingHistory: FundingPoint[] = [];
+    if (mapping.hasPerp && hlMeta.prices[mapping.sym]) {
+      try {
+        fundingHistory = await fetchHLFundingHistory(mapping.sym);
+      } catch {
+        fundingHistory = fundingRate ? genFundingHistory(fundingRate) : [];
+      }
+    } else if (fundingRate) {
+      fundingHistory = genFundingHistory(fundingRate);
     }
 
     // Fetch Polymarket bets
@@ -180,8 +237,6 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
         var bet = marketToBet(markets[mi], mi);
         if (bet) rawBets.push(bet);
       }
-
-      // Fetch odds history for each bet (parallel)
       var historyResults = await Promise.allSettled(
         rawBets.map(function(b: any) { return fetchPMOddsHistory(b._tokenId); })
       );
@@ -197,7 +252,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       }
       if (bets.length > 0) betsAreLive = true;
     } catch {
-      // Polymarket failed — use SEED bets
+      // Polymarket failed
     }
 
     // Fall back to SEED bets if we got none
@@ -217,6 +272,13 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       vl: currentPrice * 0.01,
       bets: bets,
       priceHistory: priceHistory,
+      fundingRate: fundingRate,
+      fundingRateAPR: fundingRate * 8760,
+      fundingRateHistory: fundingHistory,
+      openInterest: oi,
+      dayNtlVlm: vol,
+      premium: prem,
+      hasPerp: mapping.hasPerp,
     } as Asset;
   });
 
@@ -229,7 +291,6 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     }
   }
 
-  // If we got nothing at all, fall back completely
   if (assets.length === 0) {
     return { assets: initAssets(), liveCount: 0 };
   }

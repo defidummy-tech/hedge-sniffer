@@ -28,15 +28,22 @@ export function usePriceVariance(asset: Asset, varPeriod: VarPeriod): PriceVaria
   }, [asset, varPeriod]);
 }
 
-/** Compute P/L scenarios across price range */
+/** Compute P/L scenarios across price range, including funding P/L */
 export function useScenarios(
   collateral: number, leverage: number, entryPrice: number,
   minVal: number, maxVal: number, dir: Direction,
-  hedges: Hedge[], asset: Asset, liqPrice: number, priceVar: PriceVariance
+  hedges: Hedge[], asset: Asset, liqPrice: number, priceVar: PriceVariance,
+  holdingPeriodHours: number
 ): Scenario[] {
   return useMemo(function() {
     var eMin = Math.min(minVal, entryPrice), eMax = Math.max(maxVal, entryPrice);
     var pts = 100, step = (eMax - eMin) / (pts - 1), dirM = dir === "long" ? 1 : -1, data: Scenario[] = [];
+
+    // Funding P/L: positive rate = longs pay shorts
+    var posSize = collateral * leverage;
+    var fundingDirSign = dir === "long" ? -1 : 1; // longs pay when rate > 0
+    var fundingPL = (asset.fundingRate || 0) !== 0 ? +(fundingDirSign * asset.fundingRate * posSize * holdingPeriodHours).toFixed(2) : 0;
+
     for (var i = 0; i < pts; i++) {
       var val = +(eMin + step * i).toFixed(4);
       var isLiquidated = dir === "long" ? val <= liqPrice : val >= liqPrice;
@@ -54,6 +61,7 @@ export function useScenarios(
         hPL += wins ? profit2 : -h.size;
       }
       var net = perp + hPL;
+      var totalNet = net + fundingPL;
       var vRounded = +val.toFixed(2);
       var inVarRange = vRounded >= +priceVar.low.toFixed(2) && vRounded <= +priceVar.high.toFixed(2);
       var belowEntry = vRounded < +entryPrice.toFixed(2);
@@ -62,30 +70,49 @@ export function useScenarios(
         perpPL: +perp.toFixed(2),
         hedgePL: +hPL.toFixed(2),
         netPL: +net.toFixed(2),
+        fundingPL: fundingPL,
+        totalNetPL: +totalNet.toFixed(2),
         isLiq: isLiquidated,
-        pos: Math.max(0, net),
-        neg: Math.min(0, net),
-        varRed: (inVarRange && belowEntry) ? net : null,
-        varGreen: (inVarRange && !belowEntry) ? net : null
+        pos: Math.max(0, totalNet),
+        neg: Math.min(0, totalNet),
+        varRed: (inVarRange && belowEntry) ? totalNet : null,
+        varGreen: (inVarRange && !belowEntry) ? totalNet : null
       });
     }
     return data;
-  }, [collateral, leverage, entryPrice, minVal, maxVal, dir, hedges, asset, liqPrice, priceVar]);
+  }, [collateral, leverage, entryPrice, minVal, maxVal, dir, hedges, asset, liqPrice, priceVar, holdingPeriodHours]);
 }
 
-/** Compute risk metrics from scenarios */
+/** Compute risk metrics from scenarios, including funding yield */
 export function useRiskMetrics(
   scenarios: Scenario[], collateral: number, leverage: number,
-  entryPrice: number, dir: Direction, hedges: Hedge[], liqPrice: number
+  entryPrice: number, dir: Direction, hedges: Hedge[], liqPrice: number,
+  asset: Asset
 ): RiskMetrics {
   return useMemo(function() {
-    var pls = scenarios.map(function(s) { return s.netPL; });
+    var pls = scenarios.map(function(s) { return s.totalNetPL; });
     var mean = pls.reduce(function(a, b) { return a + b; }, 0) / pls.length;
     var v = pls.reduce(function(a, b) { return a + Math.pow(b - mean, 2); }, 0) / pls.length;
     var hCost = hedges.reduce(function(s, h) { return s + h.size; }, 0);
     var denom = leverage * (collateral / entryPrice);
     var dirM = dir === "long" ? 1 : -1;
     var be = denom > 0 ? +(entryPrice + dirM * (hCost / denom)).toFixed(4) : entryPrice;
-    return { breakeven: be, worst: Math.min.apply(null, pls), best: Math.max.apply(null, pls), vol: +Math.sqrt(v).toFixed(2), mean: +mean.toFixed(2), liqPrice: liqPrice };
-  }, [scenarios, collateral, leverage, entryPrice, dir, hedges, liqPrice]);
+
+    // Funding yield
+    var posSize = collateral * leverage;
+    var fundingDirSign = dir === "long" ? -1 : 1;
+    var dailyFunding = (asset.fundingRate || 0) !== 0 ? +(fundingDirSign * asset.fundingRate * posSize * 24).toFixed(2) : 0;
+    var fundingAPR = collateral > 0 ? +((dailyFunding * 365) / collateral).toFixed(4) : 0;
+
+    return {
+      breakeven: be,
+      worst: Math.min.apply(null, pls),
+      best: Math.max.apply(null, pls),
+      vol: +Math.sqrt(v).toFixed(2),
+      mean: +mean.toFixed(2),
+      liqPrice: liqPrice,
+      dailyFunding: dailyFunding,
+      fundingAPR: fundingAPR,
+    };
+  }, [scenarios, collateral, leverage, entryPrice, dir, hedges, liqPrice, asset]);
 }

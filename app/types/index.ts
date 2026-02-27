@@ -21,6 +21,13 @@ export interface PricePoint {
   price: number;
 }
 
+export interface FundingPoint {
+  t: number;           // Timestamp (ms)
+  rate: number;        // Hourly funding rate (decimal)
+  apr: number;         // Annualized (rate × 8760)
+  premium: number;     // Premium at this point
+}
+
 export interface Asset {
   sym: string;
   name: string;
@@ -29,6 +36,13 @@ export interface Asset {
   vl: number;          // Price volatility for history generation
   bets: Bet[];
   priceHistory: PricePoint[];
+  fundingRate: number;               // Current hourly funding rate (decimal)
+  fundingRateAPR: number;            // Annualized: fundingRate × 8760
+  fundingRateHistory: FundingPoint[];
+  openInterest: number;              // Current OI in USD
+  dayNtlVlm: number;                // 24h notional volume
+  premium: number;                   // Mark-oracle premium
+  hasPerp: boolean;                  // Whether asset has an HL perp
 }
 
 export interface SeedBet {
@@ -47,6 +61,9 @@ export interface SeedAsset {
   pr: number;
   vl: number;
   bets: SeedBet[];
+  fundingRate?: number;
+  openInterest?: number;
+  dayNtlVlm?: number;
 }
 
 export interface Hedge {
@@ -60,6 +77,8 @@ export interface Scenario {
   perpPL: number;
   hedgePL: number;
   netPL: number;
+  fundingPL: number;
+  totalNetPL: number;   // netPL + fundingPL
   isLiq: boolean;
   pos: number;
   neg: number;
@@ -74,6 +93,8 @@ export interface RiskMetrics {
   vol: number;
   mean: number;
   liqPrice: number;
+  dailyFunding: number;
+  fundingAPR: number;
 }
 
 export interface PriceVariance {
@@ -98,10 +119,47 @@ export interface OptimResult {
     cost: number;
     worstImprove: number;
     meanChange: number;
+    fundingPL: number;
+    netYieldAPR: number;
   };
   baseMean: number;
   baseWorst: number;
 }
 
+export interface ProfitZone {
+  lowPrice: number;
+  highPrice: number;
+  minProfit: number;
+  widthPct: number;
+  varianceCoverage: number;
+}
+
+export interface FundingYield {
+  dailyIncome: number;
+  weeklyIncome: number;
+  monthlyIncome: number;
+  annualizedAPR: number;
+  hedgeCost: number;
+  netAPR: number;
+  breakEvenRate: number;
+  rateVolatility: number;
+}
+
+export type DealType = "funding_harvest" | "directional_hedge" | "correlation_play";
+
+export interface Deal {
+  assetIdx: number;
+  sym: string;
+  name: string;
+  type: DealType;
+  score: number;
+  fundingAPR: number;
+  bestHedgeCost: number;
+  netYieldAPR: number;
+  description: string;
+}
+
 export type Direction = "long" | "short";
 export type VarPeriod = "1d" | "3d" | "7d" | "14d" | "30d";
+export type AppView = "scanner" | "sniffer";
+export type OptimizerMode = "balanced" | "funding_harvest" | "directional";
