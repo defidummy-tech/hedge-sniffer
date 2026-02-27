@@ -30,9 +30,11 @@ export function genOddsHistory(base: number, vol: number): OddsPoint[] {
 export function genFundingHistory(baseRate: number): FundingPoint[] {
   var h: FundingPoint[] = [], rate = baseRate;
   var now = Date.now();
+  // Clamp to ±3x the base rate to preserve extreme funding rates (e.g. 1000%+ APR)
+  var maxRate = Math.max(0.001, Math.abs(baseRate) * 3);
   for (var i = 0; i < 168; i++) {
     rate += (Math.random() - 0.5) * Math.abs(baseRate) * 0.3;
-    rate = Math.max(-0.001, Math.min(0.001, rate));
+    rate = Math.max(-maxRate, Math.min(maxRate, rate));
     h.push({
       t: now - (168 - i) * 3600000,
       rate: +rate.toFixed(8),
@@ -66,10 +68,15 @@ export const SEED: SeedAsset[] = [
     { id: "t2", q: "Trump approval above 50% in February?", od: 35, v: 2.2, th: null, url: "polymarket.com/predictions/trump" },
     { id: "t3", q: "US government shutdown in 2026?", od: 65, v: 2.8, th: null, url: "polymarket.com" }
   ] },
-  { sym: "OPENAI", name: "OpenAI", cat: "AI / Tech", pr: 715, vl: 8, fundingRate: 0.000120, openInterest: 5000000, dayNtlVlm: 20000000, bets: [
+  { sym: "OPENAI", name: "OpenAI", cat: "AI / Pre-IPO", pr: 715, vl: 8, fundingRate: 0.0012, openInterest: 5000000, dayNtlVlm: 20000000, bets: [
     { id: "oa1", q: "OpenAI IPO by December 31, 2026?", od: 52, v: 2.5, th: null, url: "polymarket.com/event/openai-ipo-by" },
     { id: "oa2", q: "OpenAI $1T+ IPO before 2027?", od: 20, v: 2, th: null, url: "polymarket.com/event/openai-1t-valuation-in-2026" },
     { id: "oa3", q: "Which company has best AI model end of March? (OpenAI)", od: 48, v: 2.3, th: null, url: "polymarket.com/predictions/ai" }
+  ] },
+  { sym: "SPACEX", name: "SpaceX", cat: "Space / Pre-IPO", pr: 350, vl: 5, fundingRate: 0.0003, openInterest: 3000000, dayNtlVlm: 8000000, bets: [
+    { id: "sx1", q: "SpaceX IPO by December 31, 2026?", od: 12, v: 2, th: null, url: "polymarket.com/event/spacex-ipo" },
+    { id: "sx2", q: "SpaceX valuation above $1 trillion at IPO?", od: 25, v: 2.5, th: 1000000000000, url: "polymarket.com/event/spacex-ipo" },
+    { id: "sx3", q: "SpaceX Starship orbital success by June 2026?", od: 65, v: 3, th: null, url: "polymarket.com/predictions/spacex" },
   ] },
   { sym: "XRP", name: "XRP", cat: "Crypto / Payments", pr: 1.32, vl: 0.08, fundingRate: 0.0000050, openInterest: 50000000, dayNtlVlm: 150000000, bets: [
     { id: "xrp1", q: "XRP above $2.00 by March 2026?", od: 15, v: 2.5, th: 2.0, url: "polymarket.com/crypto" },

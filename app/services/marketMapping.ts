@@ -16,9 +16,10 @@ export const PRIORITY_MAPPINGS: MarketMapping[] = [
   { sym: "HYPE",   name: "Hyperliquid",   cat: "DeFi / L1",         hasPerp: true,  searchTerms: ["hyperliquid"] },
   { sym: "DOGE",   name: "Dogecoin",      cat: "Meme / Crypto",     hasPerp: true,  searchTerms: ["dogecoin", "doge"] },
   { sym: "LINK",   name: "Chainlink",     cat: "Oracle / DeFi",     hasPerp: true,  searchTerms: ["chainlink", "link"] },
-  { sym: "TRUMP",  name: "Trump Media",   cat: "Politics / Crypto",  hasPerp: false, searchTerms: ["trump"] },
-  { sym: "OPENAI", name: "OpenAI",        cat: "AI / Tech",          hasPerp: false, searchTerms: ["openai"] },
-  { sym: "MSTR",   name: "MicroStrategy", cat: "BTC Treasury",       hasPerp: false, searchTerms: ["microstrategy", "mstr"] },
+  { sym: "TRUMP",  name: "Trump Media",   cat: "Politics / Crypto",  hasPerp: true,  searchTerms: ["trump"] },
+  { sym: "OPENAI", name: "OpenAI",        cat: "AI / Pre-IPO",       hasPerp: true,  searchTerms: ["openai"] },
+  { sym: "SPACEX", name: "SpaceX",       cat: "Space / Pre-IPO",    hasPerp: true,  searchTerms: ["spacex", "space x"] },
+  { sym: "MSTR",   name: "MicroStrategy", cat: "BTC Treasury",       hasPerp: true,  searchTerms: ["microstrategy", "mstr"] },
 ];
 
 // Keep backward-compatible export
