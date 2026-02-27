@@ -7,10 +7,8 @@ import type { Hedge, Direction, VarPeriod } from "./types";
 import { C } from "./utils/constants";
 import { compCorr } from "./utils/math";
 
-// ── Services ──
-import { initAssets } from "./services/dataProvider";
-
 // ── Hooks ──
+import { useAssets } from "./hooks/useAssets";
 import { useLiqPrice, usePriceVariance, useScenarios, useRiskMetrics } from "./hooks/useScenarios";
 import { useOptimizer } from "./hooks/useOptimizer";
 
@@ -34,10 +32,10 @@ import ScenariosTable from "./components/ScenariosTable";
 /* ═══════════ MAIN APP ═══════════ */
 export default function App() {
   // ── Core state ──
-  var [assets] = useState(initAssets);
+  var { assets, isLive, loading, error, refresh } = useAssets();
   var [selIdx, setSelIdx] = useState(0);
   var [showSplash, setShowSplash] = useState(true);
-  var asset = assets[selIdx];
+  var asset = assets[selIdx >= assets.length ? 0 : selIdx];
 
   // ── Position state ──
   var [dir, setDir] = useState<Direction>("long");
@@ -90,7 +88,7 @@ export default function App() {
 
       {showSplash && <Splash onClose={function() { setShowSplash(false); }} />}
 
-      <Header onShowGuide={function() { setShowSplash(true); }} />
+      <Header onShowGuide={function() { setShowSplash(true); }} isLive={isLive} loading={loading} error={error} onRefresh={refresh} />
 
       <AssetDropdown assets={assets} selIdx={selIdx} onSelect={setSelIdx} />
 
