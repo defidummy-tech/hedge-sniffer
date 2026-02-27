@@ -2,24 +2,31 @@
 
 export interface MarketMapping {
   sym: string;
-  searchTerms: string[];  // Keywords to match in Polymarket event titles
+  coin: string;            // Hyperliquid API coin name (e.g. "BTC" or "vntl:OPENAI")
+  searchTerms: string[];   // Keywords to match in Polymarket event titles
   cat: string;
   name: string;
-  hasPerp: boolean;       // Whether this asset has a Hyperliquid perp
+  hasPerp: boolean;        // Whether this asset has a Hyperliquid perp
+  isVentual: boolean;      // Whether this is a Ventuals/pre-launch token
 }
 
+// Ventuals/pre-launch tokens known on Hyperliquid
+export var VENTUAL_COINS = ["vntl:OPENAI", "vntl:SPACEX", "vntl:ANTHROPIC"];
+
 export const PRIORITY_MAPPINGS: MarketMapping[] = [
-  { sym: "BTC",    name: "Bitcoin",       cat: "Crypto / L1",        hasPerp: true,  searchTerms: ["bitcoin", "btc"] },
-  { sym: "ETH",    name: "Ethereum",      cat: "Crypto / L1",        hasPerp: true,  searchTerms: ["ethereum", "eth"] },
-  { sym: "SOL",    name: "Solana",        cat: "Crypto / L1",        hasPerp: true,  searchTerms: ["solana", "sol"] },
-  { sym: "XRP",    name: "XRP",           cat: "Crypto / Payments",  hasPerp: true,  searchTerms: ["xrp", "ripple"] },
-  { sym: "HYPE",   name: "Hyperliquid",   cat: "DeFi / L1",         hasPerp: true,  searchTerms: ["hyperliquid"] },
-  { sym: "DOGE",   name: "Dogecoin",      cat: "Meme / Crypto",     hasPerp: true,  searchTerms: ["dogecoin", "doge"] },
-  { sym: "LINK",   name: "Chainlink",     cat: "Oracle / DeFi",     hasPerp: true,  searchTerms: ["chainlink", "link"] },
-  { sym: "TRUMP",  name: "Trump Media",   cat: "Politics / Crypto",  hasPerp: true,  searchTerms: ["trump"] },
-  { sym: "OPENAI", name: "OpenAI",        cat: "AI / Pre-IPO",       hasPerp: true,  searchTerms: ["openai"] },
-  { sym: "SPACEX", name: "SpaceX",       cat: "Space / Pre-IPO",    hasPerp: true,  searchTerms: ["spacex", "space x"] },
-  { sym: "MSTR",   name: "MicroStrategy", cat: "BTC Treasury",       hasPerp: true,  searchTerms: ["microstrategy", "mstr"] },
+  { sym: "BTC",       coin: "BTC",             name: "Bitcoin",       cat: "Crypto / L1",        hasPerp: true,  isVentual: false, searchTerms: ["bitcoin", "btc"] },
+  { sym: "ETH",       coin: "ETH",             name: "Ethereum",      cat: "Crypto / L1",        hasPerp: true,  isVentual: false, searchTerms: ["ethereum", "eth"] },
+  { sym: "SOL",       coin: "SOL",             name: "Solana",        cat: "Crypto / L1",        hasPerp: true,  isVentual: false, searchTerms: ["solana", "sol"] },
+  { sym: "XRP",       coin: "XRP",             name: "XRP",           cat: "Crypto / Payments",  hasPerp: true,  isVentual: false, searchTerms: ["xrp", "ripple"] },
+  { sym: "HYPE",      coin: "HYPE",            name: "Hyperliquid",   cat: "DeFi / L1",         hasPerp: true,  isVentual: false, searchTerms: ["hyperliquid"] },
+  { sym: "DOGE",      coin: "DOGE",            name: "Dogecoin",      cat: "Meme / Crypto",     hasPerp: true,  isVentual: false, searchTerms: ["dogecoin", "doge"] },
+  { sym: "LINK",      coin: "LINK",            name: "Chainlink",     cat: "Oracle / DeFi",     hasPerp: true,  isVentual: false, searchTerms: ["chainlink", "link"] },
+  { sym: "TRUMP",     coin: "TRUMP",           name: "Trump Media",   cat: "Politics / Crypto",  hasPerp: true,  isVentual: false, searchTerms: ["trump"] },
+  { sym: "MSTR",      coin: "MSTR",            name: "MicroStrategy", cat: "BTC Treasury",       hasPerp: true,  isVentual: false, searchTerms: ["microstrategy", "mstr"] },
+  // Ventuals / Pre-IPO tokens (use vntl: prefix for HL API)
+  { sym: "OPENAI",    coin: "vntl:OPENAI",     name: "OpenAI",        cat: "AI / Pre-IPO",       hasPerp: true,  isVentual: true,  searchTerms: ["openai"] },
+  { sym: "SPACEX",    coin: "vntl:SPACEX",     name: "SpaceX",        cat: "Space / Pre-IPO",    hasPerp: true,  isVentual: true,  searchTerms: ["spacex", "space x"] },
+  { sym: "ANTHROPIC", coin: "vntl:ANTHROPIC",  name: "Anthropic",     cat: "AI / Pre-IPO",       hasPerp: true,  isVentual: true,  searchTerms: ["anthropic", "claude"] },
 ];
 
 // Keep backward-compatible export
@@ -45,9 +52,14 @@ export function buildAssetList(
   // Phase 1: All priority-mapped assets first
   for (var i = 0; i < PRIORITY_MAPPINGS.length; i++) {
     var pm = PRIORITY_MAPPINGS[i];
-    // Update hasPerp based on whether HL actually lists it
-    var hasIt = hlNames.indexOf(pm.sym) !== -1;
-    result.push({ ...pm, hasPerp: hasIt || pm.hasPerp });
+    if (pm.isVentual) {
+      // Ventuals are always included — their data comes from separate fetches
+      result.push(pm);
+    } else {
+      // Update hasPerp based on whether HL actually lists it
+      var hasIt = hlNames.indexOf(pm.sym) !== -1;
+      result.push({ ...pm, hasPerp: hasIt || pm.hasPerp });
+    }
     seen.add(pm.sym);
   }
 
@@ -72,9 +84,11 @@ export function buildAssetList(
     var c = candidates[k];
     result.push({
       sym: c.name,
+      coin: c.name,
       name: c.name,
       cat: "Discovered",
       hasPerp: true,
+      isVentual: false,
       searchTerms: [c.name.toLowerCase()],
     });
   }

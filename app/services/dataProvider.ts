@@ -68,15 +68,20 @@ export const SEED: SeedAsset[] = [
     { id: "t2", q: "Trump approval above 50% in February?", od: 35, v: 2.2, th: null, url: "polymarket.com/predictions/trump" },
     { id: "t3", q: "US government shutdown in 2026?", od: 65, v: 2.8, th: null, url: "polymarket.com" }
   ] },
-  { sym: "OPENAI", name: "OpenAI", cat: "AI / Pre-IPO", pr: 715, vl: 8, fundingRate: 0.0012, openInterest: 5000000, dayNtlVlm: 20000000, bets: [
+  { sym: "OPENAI", name: "OpenAI", cat: "AI / Pre-IPO", pr: 710, vl: 8, fundingRate: 0.014, openInterest: 1700000, dayNtlVlm: 1700000, bets: [
     { id: "oa1", q: "OpenAI IPO by December 31, 2026?", od: 52, v: 2.5, th: null, url: "polymarket.com/event/openai-ipo-by" },
     { id: "oa2", q: "OpenAI $1T+ IPO before 2027?", od: 20, v: 2, th: null, url: "polymarket.com/event/openai-1t-valuation-in-2026" },
     { id: "oa3", q: "Which company has best AI model end of March? (OpenAI)", od: 48, v: 2.3, th: null, url: "polymarket.com/predictions/ai" }
   ] },
-  { sym: "SPACEX", name: "SpaceX", cat: "Space / Pre-IPO", pr: 350, vl: 5, fundingRate: 0.0003, openInterest: 3000000, dayNtlVlm: 8000000, bets: [
+  { sym: "SPACEX", name: "SpaceX", cat: "Space / Pre-IPO", pr: 350, vl: 5, fundingRate: 0.000031, openInterest: 3000000, dayNtlVlm: 8000000, bets: [
     { id: "sx1", q: "SpaceX IPO by December 31, 2026?", od: 12, v: 2, th: null, url: "polymarket.com/event/spacex-ipo" },
     { id: "sx2", q: "SpaceX valuation above $1 trillion at IPO?", od: 25, v: 2.5, th: 1000000000000, url: "polymarket.com/event/spacex-ipo" },
     { id: "sx3", q: "SpaceX Starship orbital success by June 2026?", od: 65, v: 3, th: null, url: "polymarket.com/predictions/spacex" },
+  ] },
+  { sym: "ANTHROPIC", name: "Anthropic", cat: "AI / Pre-IPO", pr: 200, vl: 3, fundingRate: 0.000044, openInterest: 500000, dayNtlVlm: 500000, bets: [
+    { id: "an1", q: "Anthropic IPO by December 31, 2026?", od: 15, v: 2, th: null, url: "polymarket.com/event/anthropic-ipo" },
+    { id: "an2", q: "Which company has best AI model end of March? (Anthropic)", od: 35, v: 2.5, th: null, url: "polymarket.com/predictions/ai" },
+    { id: "an3", q: "Anthropic valuation above $100B in 2026?", od: 40, v: 2, th: null, url: "polymarket.com/predictions/ai" },
   ] },
   { sym: "XRP", name: "XRP", cat: "Crypto / Payments", pr: 1.32, vl: 0.08, fundingRate: 0.0000050, openInterest: 50000000, dayNtlVlm: 150000000, bets: [
     { id: "xrp1", q: "XRP above $2.00 by March 2026?", od: 15, v: 2.5, th: 2.0, url: "polymarket.com/crypto" },

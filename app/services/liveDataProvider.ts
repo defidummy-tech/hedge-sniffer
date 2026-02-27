@@ -2,7 +2,7 @@
 
 import type { Asset, Bet, PricePoint, OddsPoint, FundingPoint } from "../types";
 import { SEED, initAssets, genPriceHistory, genOddsHistory, genFundingHistory } from "./dataProvider";
-import { PRIORITY_MAPPINGS, buildAssetList, extractThreshold } from "./marketMapping";
+import { PRIORITY_MAPPINGS, VENTUAL_COINS, buildAssetList, extractThreshold } from "./marketMapping";
 import type { MarketMapping } from "./marketMapping";
 
 // ── Hyperliquid fetchers ──
@@ -41,6 +41,74 @@ async function fetchHLMeta(): Promise<HLMeta> {
     dayVolume[name] = parseFloat(ctxs[i].dayNtlVlm || "0");
     premium[name] = parseFloat(ctxs[i].premium || "0");
   }
+  return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
+}
+
+/** Fetch Ventuals/pre-launch token data (separate from regular perps) */
+async function fetchVentualsData(coins: string[]): Promise<HLMeta> {
+  var names: string[] = [];
+  var prices: Record<string, number> = {};
+  var funding: Record<string, number> = {};
+  var openInterest: Record<string, number> = {};
+  var dayVolume: Record<string, number> = {};
+  var premium: Record<string, number> = {};
+
+  var results = await Promise.allSettled(coins.map(async function(coin) {
+    // sym is the part after "vntl:" — e.g. "OPENAI"
+    var sym = coin.replace("vntl:", "");
+
+    // Get price from L2 book (midprice of best bid/ask)
+    var priceRes = await fetch("/api/hyperliquid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "l2Book", coin: coin }),
+    });
+    var midPrice = 0;
+    if (priceRes.ok) {
+      var book = await priceRes.json();
+      if (book && book.levels && book.levels.length >= 2) {
+        var bids = book.levels[0];
+        var asks = book.levels[1];
+        if (bids && bids.length > 0 && asks && asks.length > 0) {
+          midPrice = (parseFloat(bids[0].px) + parseFloat(asks[0].px)) / 2;
+        }
+      }
+    }
+
+    // Get funding from last hour's history
+    var startTime = Date.now() - 3600000;
+    var fundRes = await fetch("/api/hyperliquid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "fundingHistory", coin: coin, startTime: startTime }),
+    });
+    var fundingRate = 0;
+    var prem = 0;
+    if (fundRes.ok) {
+      var fData = await fundRes.json();
+      if (Array.isArray(fData) && fData.length > 0) {
+        var last = fData[fData.length - 1];
+        fundingRate = parseFloat(last.fundingRate || "0");
+        prem = parseFloat(last.premium || "0");
+      }
+    }
+
+    return { sym: sym, midPrice: midPrice, fundingRate: fundingRate, premium: prem };
+  }));
+
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (r.status === "fulfilled" && r.value.midPrice > 0) {
+      var d = r.value;
+      names.push(d.sym);
+      prices[d.sym] = d.midPrice;
+      funding[d.sym] = d.fundingRate;
+      premium[d.sym] = d.premium;
+      openInterest[d.sym] = 0; // Not available from these endpoints
+      dayVolume[d.sym] = 0;
+    }
+  }
+
   return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
 }
 
@@ -169,7 +237,7 @@ function marketToBet(mkt: PMMarket, idx: number): Bet | null {
 export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: number }> {
   var liveCount = 0;
 
-  // Step 1: Fetch Hyperliquid meta (prices + funding + volume + OI)
+  // Step 1: Fetch regular Hyperliquid perps meta (prices + funding + volume + OI)
   var hlMeta: HLMeta = { names: [], prices: {}, funding: {}, openInterest: {}, dayVolume: {}, premium: {} };
   try {
     hlMeta = await fetchHLMeta();
@@ -177,7 +245,24 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     console.warn("Hyperliquid meta failed, using SEED:", e);
   }
 
-  // Step 2: Build dynamic asset list (priority + discovered high-funding/volume perps)
+  // Step 2: Fetch Ventuals/pre-launch tokens (separate API path with vntl: prefix)
+  try {
+    var vntlData = await fetchVentualsData(VENTUAL_COINS);
+    // Merge Ventuals data into hlMeta (keyed by sym like "OPENAI", not "vntl:OPENAI")
+    for (var vi = 0; vi < vntlData.names.length; vi++) {
+      var vName = vntlData.names[vi];
+      if (!hlMeta.names.includes(vName)) hlMeta.names.push(vName);
+      hlMeta.prices[vName] = vntlData.prices[vName];
+      hlMeta.funding[vName] = vntlData.funding[vName];
+      hlMeta.openInterest[vName] = vntlData.openInterest[vName];
+      hlMeta.dayVolume[vName] = vntlData.dayVolume[vName];
+      hlMeta.premium[vName] = vntlData.premium[vName];
+    }
+  } catch (e) {
+    console.warn("Ventuals data fetch failed:", e);
+  }
+
+  // Step 3: Build dynamic asset list (priority + discovered high-funding/volume perps)
   var mappings: MarketMapping[];
   if (hlMeta.names.length > 0) {
     mappings = buildAssetList(hlMeta.names, hlMeta.funding, hlMeta.dayVolume, hlMeta.openInterest);
@@ -185,7 +270,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     mappings = PRIORITY_MAPPINGS;
   }
 
-  // Step 3: Build assets in parallel
+  // Step 4: Build assets in parallel
   var assetPromises = mappings.map(async function(mapping) {
     var seedAsset = SEED.find(function(s) { return s.sym === mapping.sym; });
     var currentPrice = hlMeta.prices[mapping.sym] || (seedAsset ? seedAsset.pr : 0);
@@ -196,12 +281,15 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     var vol = hlMeta.dayVolume[mapping.sym] || (seedAsset ? (seedAsset.dayNtlVlm || 0) : 0);
     var prem = hlMeta.premium[mapping.sym] || 0;
 
+    // Use the coin field for HL API calls (e.g. "vntl:OPENAI" for Ventuals, "BTC" for regular)
+    var hlCoin = mapping.coin;
+
     // Fetch candle history
     var priceHistory: PricePoint[];
     var priceIsLive = false;
-    if (mapping.hasPerp && hlMeta.prices[mapping.sym]) {
+    if (mapping.hasPerp && (hlMeta.prices[mapping.sym] || mapping.isVentual)) {
       try {
-        priceHistory = await fetchHLCandles(mapping.sym);
+        priceHistory = await fetchHLCandles(hlCoin);
         priceIsLive = true;
       } catch {
         priceHistory = genPriceHistory(currentPrice, currentPrice * 0.01);
@@ -210,11 +298,11 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       priceHistory = genPriceHistory(currentPrice, currentPrice * 0.01);
     }
 
-    // Fetch funding history (only for perps with meaningful funding)
+    // Fetch funding history
     var fundingHistory: FundingPoint[] = [];
-    if (mapping.hasPerp && hlMeta.prices[mapping.sym]) {
+    if (mapping.hasPerp && (hlMeta.prices[mapping.sym] || mapping.isVentual)) {
       try {
-        fundingHistory = await fetchHLFundingHistory(mapping.sym);
+        fundingHistory = await fetchHLFundingHistory(hlCoin);
       } catch {
         fundingHistory = fundingRate ? genFundingHistory(fundingRate) : [];
       }
