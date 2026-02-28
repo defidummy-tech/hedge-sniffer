@@ -80,7 +80,7 @@ export function formatTweet(asset: Asset): string {
   lines.push("");
   lines.push("Trade here \u2192 " + REFERRAL_LINK);
   lines.push("");
-  lines.push("Follow @DeFiDummy for more trading signals \uD83D\uDC15");
+  lines.push("Follow DeFiDummy for more trading signals \uD83D\uDC15");
 
   var tweet = lines.join("\n");
 
