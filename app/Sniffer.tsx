@@ -34,6 +34,9 @@ import ScenariosTable from "./components/ScenariosTable";
 import FundingChart from "./components/FundingChart";
 import DealScanner from "./components/DealScanner";
 import FundingHarvest from "./components/FundingHarvest";
+import BacktestView from "./components/BacktestView";
+import BotView from "./components/BotView";
+import PerformanceView from "./components/PerformanceView";
 
 /* ═══════════ MAIN APP ═══════════ */
 export default function App() {
@@ -124,6 +127,15 @@ export default function App() {
       {view === "scanner" && (
         <DealScanner deals={deals} onSelectDeal={onSelectDeal} />
       )}
+
+      {/* ═══ BACKTEST VIEW ═══ */}
+      {view === "backtest" && <BacktestView />}
+
+      {/* ═══ BOT VIEW ═══ */}
+      {view === "bot" && <BotView />}
+
+      {/* ═══ PERFORMANCE VIEW ═══ */}
+      {view === "performance" && <PerformanceView />}
 
       {/* ═══ SNIFFER VIEW ═══ */}
       {view === "sniffer" && (
@@ -255,7 +267,7 @@ export default function App() {
               <CorrelationChart correlations={correlations} />
               <ScenariosTable scenarios={scenarios} />
 
-              <div style={{ textAlign: "center", fontSize: 9, color: C.txM, padding: "6px 0" }}>DefiDummy's Hedge Deal Sniffer v6.0 · Real Polymarket bet titles, simulated odds/history · Not financial advice</div>
+              <div style={{ textAlign: "center", fontSize: 9, color: C.txM, padding: "6px 0" }}>DefiDummy's Hedge Deal Sniffer v7.0 · Real Polymarket bet titles, simulated odds/history · Not financial advice</div>
             </div>
           </div>
         </>

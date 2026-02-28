@@ -162,5 +162,105 @@ export interface Deal {
 
 export type Direction = "long" | "short";
 export type VarPeriod = "1d" | "3d" | "7d" | "14d" | "30d";
-export type AppView = "scanner" | "sniffer";
+export type AppView = "scanner" | "sniffer" | "backtest" | "bot" | "performance";
 export type OptimizerMode = "balanced" | "funding_harvest" | "directional";
+
+// ── Backtest types ──
+
+export interface BacktestEpisode {
+  token: string;
+  startTime: number;
+  peakAPR: number;
+  direction: "short-pays" | "long-pays";
+  durationHours: number;
+  stillActive: boolean;
+  aprAfter: Record<string, number | null>;  // "1h", "4h", "12h", "24h", "48h", "168h"
+  revertedBelow100: boolean;
+  revertHours: number | null;
+  cumulativeFunding7d: number;
+}
+
+export interface BacktestTokenSummary {
+  token: string;
+  episodes: number;
+  avgPeakAPR: number;
+  avgDuration: number;
+  revertPct: number;
+  avgEarnings7d: number;
+}
+
+export interface BacktestResult {
+  episodes: BacktestEpisode[];
+  tokenSummaries: BacktestTokenSummary[];
+  avgDecayCurve: Record<string, number>;  // "1h" -> avg APR
+  totalEpisodes: number;
+  avgDuration: number;
+  medianDuration: number;
+  avgRevertHours: number;
+  revertPct: number;
+  avgEarnings7d: number;
+  medianEarnings7d: number;
+}
+
+// ── Bot / Trade types ──
+
+export type TradeStatus = "open" | "closed" | "stopped";
+
+export interface BotTrade {
+  id: string;
+  coin: string;
+  direction: "long" | "short";
+  sizeUSD: number;
+  leverage: number;
+  entryPrice: number;
+  entryTime: number;
+  entryFundingAPR: number;
+  exitPrice: number | null;
+  exitTime: number | null;
+  exitFundingAPR: number | null;
+  exitReason: string | null;
+  pnl: number;
+  fundingEarned: number;
+  totalReturn: number;
+  status: TradeStatus;
+  spotHedge: boolean;
+  spotEntryPrice: number | null;
+  spotExitPrice: number | null;
+}
+
+export interface BotConfig {
+  enabled: boolean;
+  testnet: boolean;
+  entryAPR: number;
+  exitAPR: number;
+  maxPositionUSD: number;
+  leverage: number;
+  maxPositions: number;
+  stopLossPct: number;
+  maxHoldHours: number;
+  spotHedge: boolean;
+  spotHedgeRatio: number;
+}
+
+export interface BotStatus {
+  config: BotConfig;
+  accountBalance: number;
+  marginUsed: number;
+  openPositions: BotTrade[];
+  recentActions: Array<{ time: number; action: string; detail: string }>;
+}
+
+export interface PerformanceStats {
+  totalTrades: number;
+  openTrades: number;
+  closedTrades: number;
+  totalPnL: number;
+  totalFundingEarned: number;
+  winRate: number;
+  avgReturn: number;
+  bestTrade: number;
+  worstTrade: number;
+  avgHoldHours: number;
+  longWinRate: number;
+  shortWinRate: number;
+}

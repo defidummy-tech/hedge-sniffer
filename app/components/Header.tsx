@@ -25,20 +25,26 @@ export default function Header({ onShowGuide, isLive, loading, error, onRefresh,
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
         <img src={MASCOT} alt="" style={{ width: 34, height: 34, borderRadius: "50%", border: "2px solid " + C.a + "40" }} />
         <h1 style={{ margin: 0, fontSize: 17, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700 }}>DefiDummy's <span style={{ color: C.a }}>Hedge Deal</span> Sniffer</h1>
-        <span style={{ fontSize: 9, color: C.y, background: C.y + "12", padding: "2px 7px", borderRadius: 4, fontWeight: 700 }}>v6.0</span>
+        <span style={{ fontSize: 9, color: C.y, background: C.y + "12", padding: "2px 7px", borderRadius: 4, fontWeight: 700 }}>v7.0</span>
 
-        {/* Scanner / Sniffer View Toggle */}
+        {/* View Toggle Tabs */}
         <div style={{ display: "flex", borderRadius: 6, border: "1px solid " + C.b, overflow: "hidden", marginLeft: 4 }}>
-          <button onClick={function() { onViewChange("scanner"); }} style={{
-            padding: "4px 12px", border: "none", fontSize: 10, fontFamily: "monospace", fontWeight: 700, cursor: "pointer",
-            background: view === "scanner" ? C.a + "20" : "transparent",
-            color: view === "scanner" ? C.a : C.txM,
-          }}>{"\uD83D\uDD0D"} Scanner</button>
-          <button onClick={function() { onViewChange("sniffer"); }} style={{
-            padding: "4px 12px", border: "none", borderLeft: "1px solid " + C.b, fontSize: 10, fontFamily: "monospace", fontWeight: 700, cursor: "pointer",
-            background: view === "sniffer" ? C.a + "20" : "transparent",
-            color: view === "sniffer" ? C.a : C.txM,
-          }}>{"\uD83E\uDDEA"} Sniffer</button>
+          {([
+            { v: "scanner", l: "\uD83D\uDD0D Scanner", c: C.a },
+            { v: "sniffer", l: "\uD83E\uDDEA Sniffer", c: C.a },
+            { v: "backtest", l: "\uD83D\uDCCA Backtest", c: C.o },
+            { v: "bot", l: "\uD83E\uDD16 Bot", c: C.g },
+            { v: "performance", l: "\uD83C\uDFC6 P&L", c: C.p },
+          ] as { v: AppView; l: string; c: string }[]).map(function(tab, i) {
+            return (
+              <button key={tab.v} onClick={function() { onViewChange(tab.v); }} style={{
+                padding: "4px 10px", border: "none", borderLeft: i > 0 ? "1px solid " + C.b : "none",
+                fontSize: 10, fontFamily: "monospace", fontWeight: 700, cursor: "pointer",
+                background: view === tab.v ? tab.c + "20" : "transparent",
+                color: view === tab.v ? tab.c : C.txM,
+              }}>{tab.l}</button>
+            );
+          })}
         </div>
 
         <InfoTip text={statusTip} pos="bottom">
