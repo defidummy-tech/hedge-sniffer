@@ -2,16 +2,34 @@
 // Connects to Hyperliquid via SDK, scans funding rates, opens/closes positions.
 
 import { Hyperliquid } from "hyperliquid";
+import { readFileSync } from "fs";
 import type { BotTrade, BotConfig } from "../types";
 import * as journal from "./tradeJournal";
+
+// ── Read private key from env var OR Render secret file ──
+function getPrivateKey(): string | null {
+  // 1. Check env var first
+  if (process.env.HYPERLIQUID_PRIVATE_KEY) {
+    return process.env.HYPERLIQUID_PRIVATE_KEY.trim();
+  }
+  // 2. Check Render secret file (default path: /etc/secrets/<filename>)
+  var secretPath = process.env.HYPERLIQUID_KEY_FILE || "/etc/secrets/hyperliquid_key.txt";
+  try {
+    var content = readFileSync(secretPath, "utf-8").trim();
+    if (content) return content;
+  } catch (e) {
+    // File doesn't exist — that's fine
+  }
+  return null;
+}
 
 // ── SDK singleton (lazy init) ──
 var sdk: Hyperliquid | null = null;
 var sdkReady = false;
 
 async function getSDK(config: BotConfig): Promise<Hyperliquid> {
-  var key = process.env.HYPERLIQUID_PRIVATE_KEY;
-  if (!key) throw new Error("HYPERLIQUID_PRIVATE_KEY not set");
+  var key = getPrivateKey();
+  if (!key) throw new Error("No private key found (checked HYPERLIQUID_PRIVATE_KEY env var and /etc/secrets/hyperliquid_key.txt)");
 
   if (!sdk) {
     sdk = new Hyperliquid({
@@ -46,9 +64,9 @@ export async function botTick(): Promise<{
     return result;
   }
 
-  if (!process.env.HYPERLIQUID_PRIVATE_KEY) {
+  if (!getPrivateKey()) {
     journal.logAction("ERROR", "No private key configured");
-    result.errors.push("HYPERLIQUID_PRIVATE_KEY not set");
+    result.errors.push("No private key (env var or secret file)");
     return result;
   }
 
@@ -287,7 +305,7 @@ export async function getAccountStatus(): Promise<{
   positions: Array<{ coin: string; size: string; entryPx: string; unrealizedPnl: string; leverage: number }>;
 }> {
   var config = journal.getConfig();
-  if (!process.env.HYPERLIQUID_PRIVATE_KEY) {
+  if (!getPrivateKey()) {
     return { balance: 0, marginUsed: 0, positions: [] };
   }
 
