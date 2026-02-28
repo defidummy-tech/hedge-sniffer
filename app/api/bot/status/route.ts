@@ -14,7 +14,7 @@ export async function GET() {
     var recentActions = journal.getRecentActions(50);
 
     // Try to get live account data
-    var account = { balance: 0, marginUsed: 0, positions: [] as any[], walletAddress: "", error: "" };
+    var account = { balance: 0, marginUsed: 0, positions: [] as any[], walletAddress: "", error: "", debug: {} as any };
     try {
       account = await getAccountStatus();
     } catch (e: any) {
@@ -31,6 +31,7 @@ export async function GET() {
       recentActions: recentActions,
       walletAddress: account.walletAddress,
       accountError: account.error || null,
+      debug: account.debug || null,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e.message }, { status: 500 });

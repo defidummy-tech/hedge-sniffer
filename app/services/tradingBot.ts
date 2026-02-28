@@ -319,20 +319,59 @@ export async function getAccountStatus(): Promise<{
   positions: Array<{ coin: string; size: string; entryPx: string; unrealizedPnl: string; leverage: number }>;
   walletAddress: string;
   error: string;
+  debug: Record<string, any>;
 }> {
   var config = journal.getConfig();
   var walletAddr = "";
+  var debug: Record<string, any> = { testnetConfig: config.testnet };
 
   try {
     walletAddr = getWalletAddress();
+    debug.walletAddress = walletAddr;
   } catch (e) {
-    return { balance: 0, marginUsed: 0, positions: [], walletAddress: "", error: "No private key found" };
+    return { balance: 0, marginUsed: 0, positions: [], walletAddress: "", error: "No private key found", debug: debug };
+  }
+
+  // Direct raw fetch to testnet API (bypass SDK to compare)
+  try {
+    var testnetUrl = config.testnet
+      ? "https://api.hyperliquid-testnet.xyz/info"
+      : "https://api.hyperliquid.xyz/info";
+    debug.directApiUrl = testnetUrl;
+
+    var rawRes = await fetch(testnetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "clearinghouseState", user: walletAddr }),
+    });
+    var rawJson = await rawRes.json();
+    debug.directBalance = rawJson.marginSummary ? rawJson.marginSummary.accountValue : "no_margin_summary";
+    debug.directRawKeys = rawJson ? Object.keys(rawJson) : [];
+  } catch (e: any) {
+    debug.directError = e.message;
+  }
+
+  // Also check mainnet for comparison
+  try {
+    var mainUrl = "https://api.hyperliquid.xyz/info";
+    var mainRes = await fetch(mainUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "clearinghouseState", user: walletAddr }),
+    });
+    var mainJson = await mainRes.json();
+    debug.mainnetBalance = mainJson.marginSummary ? mainJson.marginSummary.accountValue : "no_margin_summary";
+  } catch (e: any) {
+    debug.mainnetError = e.message;
   }
 
   try {
     var hl = await getSDK(config);
+    debug.sdkBaseUrl = (hl as any).baseUrl || "unknown";
 
     var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
+    debug.sdkBalance = state.marginSummary.accountValue;
+
     return {
       balance: parseFloat(state.marginSummary.accountValue),
       marginUsed: parseFloat(state.marginSummary.totalMarginUsed),
@@ -347,10 +386,12 @@ export async function getAccountStatus(): Promise<{
       }).filter(function(p) { return parseFloat(p.size) !== 0; }),
       walletAddress: walletAddr,
       error: "",
+      debug: debug,
     };
   } catch (e: any) {
     var errMsg = e.message || "Unknown error";
     journal.logAction("ERROR", "Account status: " + errMsg);
-    return { balance: 0, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg };
+    debug.sdkError = errMsg;
+    return { balance: 0, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg, debug: debug };
   }
 }
