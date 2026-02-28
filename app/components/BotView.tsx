@@ -160,21 +160,32 @@ export default function BotView() {
     }
   }, [config]);
 
-  // Kill switch
+  // Kill switch — actually closes positions on Hyperliquid
+  var [killing, setKilling] = useState(false);
   var killAll = useCallback(async function() {
-    if (!confirm("Close ALL positions and disable bot?")) return;
+    if (!confirm("CLOSE ALL POSITIONS on Hyperliquid and disable bot?")) return;
+    setKilling(true);
+    setStatusMsg("Closing all positions...");
     try {
-      var res = await fetch("/api/bot/config", {
+      var res = await fetch("/api/bot/kill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...config, enabled: false }),
       });
+      var json = await res.json();
       setConfig(function(c) { return { ...c, enabled: false }; });
-      setStatusMsg("Bot disabled. Positions will be closed on next tick.");
+      if (json.ok) {
+        setStatusMsg("KILLED: " + (json.closed || []).length + " position(s) closed. " + (json.errors && json.errors.length > 0 ? "Errors: " + json.errors.join(", ") : ""));
+      } else {
+        setStatusMsg("Kill error: " + (json.error || "unknown"));
+      }
+      // Refresh status after kill
+      setTimeout(fetchStatus, 2000);
     } catch (e: any) {
       setStatusMsg("Kill failed: " + (e.message || "unknown"));
+    } finally {
+      setKilling(false);
     }
-  }, [config]);
+  }, [fetchStatus]);
 
   // Update config field helper
   var upd = function(field: string, value: any) {
@@ -309,12 +320,12 @@ export default function BotView() {
             }}>
               {saving ? "\u27F3" : "\u2714"} Save Config
             </button>
-            <button onClick={killAll} style={{
+            <button onClick={killAll} disabled={killing} style={{
               flex: 1, padding: "12px 16px", borderRadius: 8, border: "1px solid " + C.r + "50",
               background: "linear-gradient(135deg," + C.r + "15," + C.r + "08)",
-              color: C.r, fontFamily: "monospace", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              color: C.r, fontFamily: "monospace", fontSize: 12, fontWeight: 700, cursor: killing ? "wait" : "pointer",
             }}>
-              {"\u26D4"} Kill Switch
+              {killing ? "\u27F3 Closing..." : "\u26D4 Kill Switch"}
             </button>
           </div>
 

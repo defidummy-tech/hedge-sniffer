@@ -63,6 +63,48 @@ function genId(): string {
   return "t_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
 }
 
+// ── Close ALL open positions on Hyperliquid ──
+export async function closeAllPositions(): Promise<{ closed: string[]; errors: string[] }> {
+  var config = journal.getConfig();
+  var closed: string[] = [];
+  var errors: string[] = [];
+
+  if (!getPrivateKey()) {
+    errors.push("No private key");
+    return { closed: closed, errors: errors };
+  }
+
+  try {
+    var hl = await getSDK(config);
+    var walletAddr = getWalletAddress();
+
+    // Get all live positions from Hyperliquid
+    var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
+    var livePositions = state.assetPositions.filter(function(p) {
+      return parseFloat(p.position.szi) !== 0;
+    });
+
+    journal.logAction("KILL", "Found " + livePositions.length + " live position(s) to close");
+
+    for (var pos of livePositions) {
+      var coin = pos.position.coin;
+      try {
+        await hl.custom.marketClose(coin);
+        closed.push(coin);
+        journal.logAction("KILL", "Closed " + coin);
+      } catch (e: any) {
+        errors.push(coin + ": " + e.message);
+        journal.logAction("ERROR", "Kill close " + coin + ": " + e.message);
+      }
+    }
+  } catch (e: any) {
+    errors.push("SDK error: " + e.message);
+    journal.logAction("ERROR", "Kill switch SDK: " + e.message);
+  }
+
+  return { closed: closed, errors: errors };
+}
+
 // ── Main bot tick ──
 export async function botTick(): Promise<{
   scanned: number;
