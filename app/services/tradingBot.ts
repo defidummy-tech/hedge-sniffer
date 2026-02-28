@@ -2,6 +2,7 @@
 // Connects to Hyperliquid via SDK, scans funding rates, opens/closes positions.
 
 import { Hyperliquid } from "hyperliquid";
+import { ethers } from "ethers";
 import { readFileSync } from "fs";
 import type { BotTrade, BotConfig } from "../types";
 import * as journal from "./tradeJournal";
@@ -21,6 +22,20 @@ function getPrivateKey(): string | null {
     // File doesn't exist — that's fine
   }
   return null;
+}
+
+// ── Derive wallet address from private key ──
+var cachedWalletAddress: string | null = null;
+
+function getWalletAddress(): string {
+  if (cachedWalletAddress) return cachedWalletAddress;
+  var key = getPrivateKey();
+  if (!key) throw new Error("No private key available");
+  // Ensure key has 0x prefix for ethers
+  var formattedKey = key.startsWith("0x") ? key : "0x" + key;
+  var wallet = new ethers.Wallet(formattedKey);
+  cachedWalletAddress = wallet.address;
+  return cachedWalletAddress;
 }
 
 // ── SDK singleton (lazy init) ──
@@ -108,8 +123,7 @@ async function checkExistingPositions(
   if (openTrades.length === 0) return;
 
   // Get account state
-  var wallet = hl.exchange as any;
-  var walletAddress = wallet.walletAddress || process.env.HYPERLIQUID_WALLET_ADDRESS || "";
+  var walletAddress = getWalletAddress();
 
   var state = await hl.info.perpetuals.getClearinghouseState(walletAddress);
 
@@ -311,8 +325,7 @@ export async function getAccountStatus(): Promise<{
 
   try {
     var hl = await getSDK(config);
-    var wallet = hl.exchange as any;
-    var walletAddress = wallet.walletAddress || process.env.HYPERLIQUID_WALLET_ADDRESS || "";
+    var walletAddress = getWalletAddress();
 
     var state = await hl.info.perpetuals.getClearinghouseState(walletAddress);
     return {
