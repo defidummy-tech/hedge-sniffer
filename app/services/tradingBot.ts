@@ -317,17 +317,22 @@ export async function getAccountStatus(): Promise<{
   balance: number;
   marginUsed: number;
   positions: Array<{ coin: string; size: string; entryPx: string; unrealizedPnl: string; leverage: number }>;
+  walletAddress: string;
+  error: string;
 }> {
   var config = journal.getConfig();
-  if (!getPrivateKey()) {
-    return { balance: 0, marginUsed: 0, positions: [] };
+  var walletAddr = "";
+
+  try {
+    walletAddr = getWalletAddress();
+  } catch (e) {
+    return { balance: 0, marginUsed: 0, positions: [], walletAddress: "", error: "No private key found" };
   }
 
   try {
     var hl = await getSDK(config);
-    var walletAddress = getWalletAddress();
 
-    var state = await hl.info.perpetuals.getClearinghouseState(walletAddress);
+    var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
     return {
       balance: parseFloat(state.marginSummary.accountValue),
       marginUsed: parseFloat(state.marginSummary.totalMarginUsed),
@@ -340,9 +345,12 @@ export async function getAccountStatus(): Promise<{
           leverage: p.position.leverage.value,
         };
       }).filter(function(p) { return parseFloat(p.size) !== 0; }),
+      walletAddress: walletAddr,
+      error: "",
     };
   } catch (e: any) {
-    journal.logAction("ERROR", "Account status: " + e.message);
-    return { balance: 0, marginUsed: 0, positions: [] };
+    var errMsg = e.message || "Unknown error";
+    journal.logAction("ERROR", "Account status: " + errMsg);
+    return { balance: 0, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg };
   }
 }

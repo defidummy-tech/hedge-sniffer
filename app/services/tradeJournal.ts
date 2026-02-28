@@ -1,7 +1,7 @@
 // ═══ Persistent Trade Journal ═══
-// Persists bot config and trades to a JSON file on disk so they survive
-// server restarts (Render free tier spins down after inactivity).
-// Falls back to in-memory if disk write fails.
+// Persists bot config and trades to JSON files on disk.
+// IMPORTANT: In Next.js, each API route is a separate serverless instance,
+// so in-memory state is NOT shared. Every read must re-read from disk.
 
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
@@ -37,7 +37,7 @@ function parseBool(v: string | undefined, fallback: boolean): boolean {
   return v === "true" || v === "1";
 }
 
-// ── Load from disk ──
+// ── Disk I/O ──
 function loadJSON(path: string): any {
   try {
     var raw = readFileSync(path, "utf-8");
@@ -49,50 +49,59 @@ function loadJSON(path: string): any {
 
 function saveJSON(path: string, data: any): void {
   try {
+    mkdirSync(DATA_DIR, { recursive: true });
     writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
   } catch (e) {
-    // Disk write failed — data stays in memory only
+    // Disk write failed — log it
+    console.error("tradeJournal saveJSON failed:", path, e);
   }
 }
 
-// ── Initialize from disk or defaults ──
-var config: BotConfig = loadJSON(CONFIG_FILE) || defaultConfig();
-var trades: BotTrade[] = loadJSON(TRADES_FILE) || [];
+// ── Action log (in-memory only, not critical) ──
 var actions: Array<{ time: number; action: string; detail: string }> = [];
 
 // ── Config ──
+// Always reads from disk to handle cross-instance updates (Next.js serverless)
 
 export function getConfig(): BotConfig {
-  return { ...config };
+  var diskConfig = loadJSON(CONFIG_FILE);
+  if (diskConfig) return diskConfig as BotConfig;
+  return defaultConfig();
 }
 
 export function updateConfig(partial: Partial<BotConfig>): BotConfig {
+  // Read current from disk first (not stale in-memory)
+  var current = getConfig();
   for (var k in partial) {
-    if (k in config) {
-      (config as any)[k] = (partial as any)[k];
+    if (k in current) {
+      (current as any)[k] = (partial as any)[k];
     }
   }
-  saveJSON(CONFIG_FILE, config);
-  return { ...config };
+  saveJSON(CONFIG_FILE, current);
+  return { ...current };
 }
 
 // ── Trades ──
+// Always reads from disk for consistency
 
 export function getAllTrades(): BotTrade[] {
-  return trades.slice();
+  var diskTrades = loadJSON(TRADES_FILE);
+  return Array.isArray(diskTrades) ? diskTrades : [];
 }
 
 export function getOpenTrades(): BotTrade[] {
-  return trades.filter(function(t) { return t.status === "open"; });
+  return getAllTrades().filter(function(t) { return t.status === "open"; });
 }
 
 export function addTrade(trade: BotTrade): void {
+  var trades = getAllTrades();
   trades.push(trade);
   saveJSON(TRADES_FILE, trades);
   logAction("OPEN", trade.coin + " " + trade.direction.toUpperCase() + " $" + trade.sizeUSD + " @ $" + trade.entryPrice.toFixed(2) + " (APR: " + (trade.entryFundingAPR * 100).toFixed(0) + "%)");
 }
 
 export function closeTrade(tradeId: string, exitPrice: number, exitFundingAPR: number, exitReason: string, pnl: number, fundingEarned: number, spotExitPrice?: number): void {
+  var trades = getAllTrades();
   var trade = trades.find(function(t) { return t.id === tradeId; });
   if (!trade) return;
   trade.exitPrice = exitPrice;
@@ -109,14 +118,13 @@ export function closeTrade(tradeId: string, exitPrice: number, exitFundingAPR: n
 }
 
 export function isAlreadyOpen(coin: string): boolean {
-  return trades.some(function(t) { return t.coin === coin && t.status === "open"; });
+  return getOpenTrades().some(function(t) { return t.coin === coin; });
 }
 
 // ── Action Log (in-memory only — not critical to persist) ──
 
 export function logAction(action: string, detail: string): void {
   actions.unshift({ time: Date.now(), action: action, detail: detail });
-  // Keep last 200 entries
   if (actions.length > 200) actions.length = 200;
 }
 

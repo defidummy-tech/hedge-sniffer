@@ -110,6 +110,8 @@ export default function BotView() {
   var [error, setError] = useState<string | null>(null);
   var [saving, setSaving] = useState(false);
   var [statusMsg, setStatusMsg] = useState<string | null>(null);
+  var [walletAddress, setWalletAddress] = useState<string>("");
+  var [accountError, setAccountError] = useState<string>("");
 
   // Fetch bot status
   var fetchStatus = useCallback(async function() {
@@ -121,6 +123,9 @@ export default function BotView() {
         setStatus(json);
         setConfig(json.config || DEFAULT_CONFIG);
         setError(null);
+        if (json.walletAddress) setWalletAddress(json.walletAddress);
+        if (json.accountError) setAccountError(json.accountError);
+        else setAccountError("");
       }
     } catch (e: any) {
       // API doesn't exist yet — that's OK
@@ -211,6 +216,16 @@ export default function BotView() {
                 <div>Balance: <span style={{ color: C.g, fontWeight: 600 }}>${(status.accountBalance || 0).toFixed(2)}</span></div>
                 <div>Margin Used: <span style={{ color: C.o, fontWeight: 600 }}>${(status.marginUsed || 0).toFixed(2)}</span></div>
                 <div>Open Positions: <span style={{ color: C.a, fontWeight: 600 }}>{positions.length}</span></div>
+              </div>
+            )}
+            {walletAddress && (
+              <div style={{ marginTop: 6, fontSize: 9, color: C.txD, wordBreak: "break-all" }}>
+                Wallet: {walletAddress}
+              </div>
+            )}
+            {accountError && (
+              <div style={{ marginTop: 6, fontSize: 9, color: C.r, wordBreak: "break-all" }}>
+                {"\u26A0"} {accountError}
               </div>
             )}
           </div>

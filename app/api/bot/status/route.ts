@@ -14,11 +14,11 @@ export async function GET() {
     var recentActions = journal.getRecentActions(50);
 
     // Try to get live account data
-    var account = { balance: 0, marginUsed: 0, positions: [] as any[] };
+    var account = { balance: 0, marginUsed: 0, positions: [] as any[], walletAddress: "", error: "" };
     try {
       account = await getAccountStatus();
-    } catch (e) {
-      // SDK not initialized or no key — return zeros
+    } catch (e: any) {
+      account.error = e.message || "Unknown error";
     }
 
     return NextResponse.json({
@@ -29,6 +29,8 @@ export async function GET() {
       openPositions: openTrades,
       livePositions: account.positions,
       recentActions: recentActions,
+      walletAddress: account.walletAddress,
+      accountError: account.error || null,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
