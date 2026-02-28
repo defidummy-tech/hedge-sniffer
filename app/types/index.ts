@@ -43,6 +43,7 @@ export interface Asset {
   dayNtlVlm: number;                // 24h notional volume
   premium: number;                   // Mark-oracle premium
   hasPerp: boolean;                  // Whether asset has an HL perp
+  coin?: string;                     // HL API coin name (e.g. "BTC" or "vntl:OPENAI")
 }
 
 export interface SeedBet {

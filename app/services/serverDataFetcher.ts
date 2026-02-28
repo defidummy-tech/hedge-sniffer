@@ -111,6 +111,31 @@ async function fetchVentualsServer(coins: string[]): Promise<HLMeta> {
   return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
 }
 
+/** Fetch N-day funding rate history for a single coin (server-side) */
+export async function fetchFundingHistoryServer(
+  coin: string,
+  lookbackDays: number
+): Promise<Array<{ time: number; fundingRate: number; premium: number }>> {
+  var startTime = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+  var res = await fetch(HL_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "fundingHistory", coin: coin, startTime: startTime }),
+  });
+  if (!res.ok) throw new Error("HL fundingHistory " + res.status);
+  var data = await res.json();
+  if (!Array.isArray(data)) return [];
+  var result: Array<{ time: number; fundingRate: number; premium: number }> = [];
+  for (var i = 0; i < data.length; i++) {
+    result.push({
+      time: data[i].time,
+      fundingRate: parseFloat(data[i].fundingRate || "0"),
+      premium: parseFloat(data[i].premium || "0"),
+    });
+  }
+  return result;
+}
+
 /** Fetch all assets server-side for cron job use. Skips candle/odds history for speed. */
 export async function fetchAssetsForCron(): Promise<Asset[]> {
   // 1. Fetch regular HL perps
@@ -167,6 +192,7 @@ export async function fetchAssetsForCron(): Promise<Asset[]> {
       dayNtlVlm: hlMeta.dayVolume[mapping.sym] || 0,
       premium: hlMeta.premium[mapping.sym] || 0,
       hasPerp: true,
+      coin: mapping.coin,
     });
   }
 
