@@ -119,18 +119,13 @@ function getTwitterClient(): TwitterApi | null {
   });
 }
 
-/** Post a tweet. Returns tweet ID on success, null on failure. */
-export async function postTweet(text: string): Promise<string | null> {
+/** Post a tweet. Returns tweet ID on success, throws on failure. */
+export async function postTweet(text: string): Promise<string> {
   var client = getTwitterClient();
-  if (!client) return null;
+  if (!client) throw new Error("Twitter credentials not configured — check env vars");
 
-  try {
-    var result = await client.v2.tweet(text);
-    return result.data.id;
-  } catch (err: any) {
-    console.error("Tweet failed:", err?.data || err?.message || err);
-    return null;
-  }
+  var result = await client.v2.tweet(text);
+  return result.data.id;
 }
 
 /** Process a high-funding deal: format, check cooldown, post tweet */
@@ -146,11 +141,13 @@ export async function processDealAlert(asset: Asset): Promise<{
 
   var text = formatTweet(asset);
 
-  var tweetId = await postTweet(text);
-  if (tweetId) {
+  try {
+    var tweetId = await postTweet(text);
     recordTweet(asset.sym);
     return { posted: true, reason: "success", tweetId: tweetId, tweetText: text };
+  } catch (err: any) {
+    var msg = err?.data?.detail || err?.data?.title || err?.message || "unknown";
+    console.error("Tweet failed for " + asset.sym + ":", err?.data || msg);
+    return { posted: false, reason: "api_error: " + msg };
   }
-
-  return { posted: false, reason: "api_error" };
 }
