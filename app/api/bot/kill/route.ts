@@ -3,7 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import * as journal from "../../../services/tradeJournal";
-import { closeAllPositions } from "../../../services/tradingBot";
+import { closeAllPositions, getPositionDetails } from "../../../services/tradingBot";
 
 export var dynamic = "force-dynamic";
 
@@ -17,15 +17,36 @@ export async function POST(req: NextRequest) {
     journal.updateConfig({ enabled: false });
     journal.logAction("KILL", "Kill switch activated — closing all positions");
 
-    // 2. Close all positions on Hyperliquid
+    // 2. Fetch live P&L data BEFORE closing positions
+    var pnlDetails: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> = {};
+    try {
+      pnlDetails = await getPositionDetails();
+    } catch (e: any) {
+      journal.logAction("ERROR", "Kill: failed to fetch P&L details: " + e.message);
+    }
+
+    // 3. Close all positions on Hyperliquid
     var result = await closeAllPositions();
     closed = result.closed;
     errors = result.errors;
 
-    // 3. Mark all journal trades as closed
+    // 4. Mark all journal trades as closed with actual P&L
     var openTrades = journal.getOpenTrades();
     for (var trade of openTrades) {
-      journal.closeTrade(trade.id, trade.entryPrice, 0, "kill_switch", 0, 0);
+      var details = pnlDetails[trade.coin];
+      if (details) {
+        journal.closeTrade(
+          trade.id,
+          details.midPrice,
+          0,
+          "kill_switch",
+          details.unrealizedPnl,
+          details.cumFunding
+        );
+      } else {
+        // Fallback: no live data available
+        journal.closeTrade(trade.id, trade.entryPrice, 0, "kill_switch", 0, 0);
+      }
     }
 
     var elapsed = ((Date.now() - start) / 1000).toFixed(1) + "s";

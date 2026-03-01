@@ -437,3 +437,33 @@ export async function getAccountStatus(): Promise<{
     return { balance: 0, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg, debug: debug };
   }
 }
+
+// ── Get live position P&L details (for kill switch) ──
+export async function getPositionDetails(): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
+  var config = journal.getConfig();
+  var result: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> = {};
+
+  try {
+    var walletAddr = getWalletAddress();
+    var hl = await getSDK(config);
+
+    var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
+    var mids = await hl.info.getAllMids();
+
+    for (var pos of state.assetPositions) {
+      var coin = pos.position.coin;
+      var size = parseFloat(pos.position.szi);
+      if (size === 0) continue;
+
+      result[coin] = {
+        unrealizedPnl: parseFloat(pos.position.unrealizedPnl),
+        cumFunding: parseFloat(pos.position.cumFunding.sinceOpen),
+        midPrice: mids[coin] ? parseFloat(mids[coin]) : parseFloat(pos.position.entryPx),
+      };
+    }
+  } catch (e: any) {
+    journal.logAction("ERROR", "getPositionDetails: " + e.message);
+  }
+
+  return result;
+}

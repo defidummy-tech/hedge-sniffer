@@ -1,4 +1,4 @@
-// ═══ Backtest API: funding rate spike analysis ═══
+// ═══ Backtest API: funding rate spike analysis + price impact ═══
 
 import { NextResponse } from "next/server";
 
@@ -38,6 +38,43 @@ async function fetchFundingHistoryPaginated(coin: string, lookbackDays: number):
   });
 }
 
+// ── Price data fetching ──
+
+async function fetchCandleSnapshot(coin: string, startTime: number, endTime: number): Promise<any[]> {
+  try {
+    var data = await hlFetch({
+      type: "candleSnapshot",
+      req: { coin: coin, interval: "1h", startTime: startTime, endTime: endTime },
+    });
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function findPrice(candles: any[], targetTime: number): number | null {
+  if (!candles || candles.length === 0) return null;
+  var closest: any = null;
+  var closestDiff = Infinity;
+
+  for (var i = 0; i < candles.length; i++) {
+    var candleTime = candles[i].t;
+    var diff = Math.abs(candleTime - targetTime);
+    if (diff < closestDiff) {
+      closestDiff = diff;
+      closest = candles[i];
+    }
+  }
+
+  // Only accept if within 2 hours of target
+  if (closest && closestDiff < 7200000) {
+    return parseFloat(closest.c); // close price
+  }
+  return null;
+}
+
+// ── Episode types and analysis ──
+
 interface Episode {
   token: string;
   startTime: number;
@@ -49,13 +86,18 @@ interface Episode {
   revertedBelow100: boolean;
   revertHours: number | null;
   cumulativeFunding7d: number;
+  priceAtEntry: number | null;
+  priceAfter7d: number | null;
+  pricePnlPct: number | null;
+  netReturn7d: number | null;
 }
 
 function identifyAndAnalyzeEpisodes(
   history: any[],
   coin: string,
   extremeRate: number,
-  revertRate: number
+  revertRate: number,
+  candles: any[]
 ): Episode[] {
   if (!history || history.length === 0) return [];
   history.sort(function(a, b) { return a.time - b.time; });
@@ -80,7 +122,7 @@ function identifyAndAnalyzeEpisodes(
       if (absRate > epPeakRate) epPeakRate = absRate;
     } else if (!isExtreme && inEpisode) {
       var dur = (history[i].time - epStart) / (3600000);
-      var ep = analyzeEpisode(history, coin, epStart, epPeakRate, epDirection, dur, false, revertRate);
+      var ep = analyzeEpisode(history, coin, epStart, epPeakRate, epDirection, dur, false, revertRate, candles);
       episodes.push(ep);
       inEpisode = false;
     }
@@ -90,7 +132,7 @@ function identifyAndAnalyzeEpisodes(
   if (inEpisode) {
     var lastTime = history[history.length - 1].time;
     var durActive = (lastTime - epStart) / 3600000;
-    var epActive = analyzeEpisode(history, coin, epStart, epPeakRate, epDirection, durActive, true, revertRate);
+    var epActive = analyzeEpisode(history, coin, epStart, epPeakRate, epDirection, durActive, true, revertRate, candles);
     episodes.push(epActive);
   }
 
@@ -105,7 +147,8 @@ function analyzeEpisode(
   direction: "short-pays" | "long-pays",
   durationHours: number,
   stillActive: boolean,
-  revertRate: number
+  revertRate: number,
+  candles: any[]
 ): Episode {
   var aprAfter: Record<string, number | null> = {};
 
@@ -151,6 +194,24 @@ function analyzeEpisode(
     }
   }
 
+  // ── Price impact calculation ──
+  var priceAtEntry = findPrice(candles, startTime);
+  var priceAfter7d = findPrice(candles, startTime + 7 * 24 * 3600000);
+
+  var pricePnlPct: number | null = null;
+  var netReturn7d: number | null = null;
+
+  if (priceAtEntry !== null && priceAfter7d !== null && priceAtEntry > 0) {
+    if (direction === "long-pays") {
+      // We go SHORT: profit when price drops
+      pricePnlPct = (priceAtEntry - priceAfter7d) / priceAtEntry;
+    } else {
+      // We go LONG: profit when price rises
+      pricePnlPct = (priceAfter7d - priceAtEntry) / priceAtEntry;
+    }
+    netReturn7d = cumRate + pricePnlPct;
+  }
+
   return {
     token: coin,
     startTime: startTime,
@@ -162,6 +223,10 @@ function analyzeEpisode(
     revertedBelow100: revertedBelow100,
     revertHours: revertHours,
     cumulativeFunding7d: cumRate,
+    priceAtEntry: priceAtEntry,
+    priceAfter7d: priceAfter7d,
+    pricePnlPct: pricePnlPct,
+    netReturn7d: netReturn7d,
   };
 }
 
@@ -191,42 +256,68 @@ export async function GET(request: Request) {
     // Top 20 by funding rate
     var top20 = tokens.slice(0, 20);
 
-    // 2. Fetch funding history for top 20
-    var allEpisodes: Episode[] = [];
-    var tokenSummaries: Array<{
-      token: string; episodes: number; avgPeakAPR: number; avgDuration: number;
-      revertPct: number; avgEarnings7d: number;
-    }> = [];
+    // 2. Fetch funding history AND candle data for top 20 in parallel
+    var lookbackStart = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+    var now = Date.now();
+
+    var fundingFetches = top20.map(function(t) {
+      return fetchFundingHistoryPaginated(t.name, lookbackDays);
+    });
+    var candleFetches = top20.map(function(t) {
+      return fetchCandleSnapshot(t.name, lookbackStart, now);
+    });
+
+    var allFetches = await Promise.allSettled([...fundingFetches, ...candleFetches]);
 
     var histories: Record<string, any[]> = {};
-    var fetchResults = await Promise.allSettled(
-      top20.map(function(t) { return fetchFundingHistoryPaginated(t.name, lookbackDays); })
-    );
+    var candleMap: Record<string, any[]> = {};
 
-    for (var fi = 0; fi < fetchResults.length; fi++) {
-      if (fetchResults[fi].status === "fulfilled") {
-        histories[top20[fi].name] = (fetchResults[fi] as PromiseFulfilledResult<any[]>).value;
+    for (var fi = 0; fi < top20.length; fi++) {
+      // Funding results are in first 20 slots
+      if (allFetches[fi].status === "fulfilled") {
+        histories[top20[fi].name] = (allFetches[fi] as PromiseFulfilledResult<any[]>).value;
+      }
+      // Candle results are in slots 20-39
+      var candleIdx = fi + top20.length;
+      if (allFetches[candleIdx].status === "fulfilled") {
+        candleMap[top20[fi].name] = (allFetches[candleIdx] as PromiseFulfilledResult<any[]>).value;
       }
     }
 
     // 3. Analyze episodes
+    var allEpisodes: Episode[] = [];
+    var tokenSummaries: Array<{
+      token: string; episodes: number; avgPeakAPR: number; avgDuration: number;
+      revertPct: number; avgEarnings7d: number; avgPricePnl7d: number; avgNetReturn7d: number;
+    }> = [];
+
     for (var ti = 0; ti < top20.length; ti++) {
       var tokenName = top20[ti].name;
       var history = histories[tokenName];
       if (!history || history.length === 0) continue;
 
-      var episodes = identifyAndAnalyzeEpisodes(history, tokenName, extremeRate, revertRate);
+      var candles = candleMap[tokenName] || [];
+      var episodes = identifyAndAnalyzeEpisodes(history, tokenName, extremeRate, revertRate, candles);
       if (episodes.length === 0) continue;
 
       allEpisodes = allEpisodes.concat(episodes);
 
       // Token summary
       var sumPeak = 0, sumDur = 0, sumEarn = 0, revCount = 0;
+      var sumPricePnl = 0, pricePnlCount = 0, sumNetReturn = 0, netReturnCount = 0;
       for (var ei = 0; ei < episodes.length; ei++) {
         sumPeak += episodes[ei].peakAPR;
         sumDur += episodes[ei].durationHours;
         sumEarn += episodes[ei].cumulativeFunding7d;
         if (episodes[ei].revertedBelow100) revCount++;
+        if (episodes[ei].pricePnlPct !== null) {
+          sumPricePnl += episodes[ei].pricePnlPct!;
+          pricePnlCount++;
+        }
+        if (episodes[ei].netReturn7d !== null) {
+          sumNetReturn += episodes[ei].netReturn7d!;
+          netReturnCount++;
+        }
       }
       tokenSummaries.push({
         token: tokenName,
@@ -235,6 +326,8 @@ export async function GET(request: Request) {
         avgDuration: sumDur / episodes.length,
         revertPct: (revCount / episodes.length) * 100,
         avgEarnings7d: sumEarn / episodes.length,
+        avgPricePnl7d: pricePnlCount > 0 ? sumPricePnl / pricePnlCount : 0,
+        avgNetReturn7d: netReturnCount > 0 ? sumNetReturn / netReturnCount : 0,
       });
     }
 
@@ -242,6 +335,8 @@ export async function GET(request: Request) {
     var durations = allEpisodes.map(function(e) { return e.durationHours; });
     var earnings = allEpisodes.map(function(e) { return e.cumulativeFunding7d; });
     var revertTimes = allEpisodes.filter(function(e) { return e.revertedBelow100 && e.revertHours !== null; }).map(function(e) { return e.revertHours!; });
+    var pricePnls = allEpisodes.filter(function(e) { return e.pricePnlPct !== null; }).map(function(e) { return e.pricePnlPct!; });
+    var netReturns = allEpisodes.filter(function(e) { return e.netReturn7d !== null; }).map(function(e) { return e.netReturn7d!; });
 
     var avg = function(arr: number[]) { return arr.length ? arr.reduce(function(s, v) { return s + v; }, 0) / arr.length : 0; };
     var med = function(arr: number[]) {
@@ -276,6 +371,9 @@ export async function GET(request: Request) {
       revertPct: allEpisodes.length ? +(reverted.length / allEpisodes.length * 100).toFixed(1) : 0,
       avgEarnings7d: +avg(earnings).toFixed(6),
       medianEarnings7d: +med(earnings).toFixed(6),
+      avgPricePnl7d: +avg(pricePnls).toFixed(6),
+      avgNetReturn7d: +avg(netReturns).toFixed(6),
+      medianNetReturn7d: +med(netReturns).toFixed(6),
     };
 
     var elapsed = Date.now() - startMs;
