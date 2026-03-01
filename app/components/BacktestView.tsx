@@ -262,16 +262,16 @@ function DirectionBreakdown(props: { episodes: BacktestEpisode[] }) {
     {
       label: "Long-Pays (SHORT to earn)", count: longPays.length, color: C.r,
       avgPeak: avgVal(longPays, function(e) { return e.peakAPR; }),
-      avgHold: avgVal(longPays, function(e) { return e.holdHours || e.durationHours; }),
-      avgFunding: avgVal(longPays, function(e) { return e.cumulativeFundingHold || e.cumulativeFunding7d; }),
+      avgHold: avgVal(longPays, function(e) { return e.holdHours || 0; }),
+      avgFunding: avgVal(longPays, function(e) { return e.cumulativeFundingHold || 0; }),
       avgPrice: avgNullable(longPays, function(e) { return e.pricePnlPct; }),
       avgNet: avgNullable(longPays, function(e) { return e.netReturn; }),
     },
     {
       label: "Short-Pays (LONG to earn)", count: shortPays.length, color: C.g,
       avgPeak: avgVal(shortPays, function(e) { return e.peakAPR; }),
-      avgHold: avgVal(shortPays, function(e) { return e.holdHours || e.durationHours; }),
-      avgFunding: avgVal(shortPays, function(e) { return e.cumulativeFundingHold || e.cumulativeFunding7d; }),
+      avgHold: avgVal(shortPays, function(e) { return e.holdHours || 0; }),
+      avgFunding: avgVal(shortPays, function(e) { return e.cumulativeFundingHold || 0; }),
       avgPrice: avgNullable(shortPays, function(e) { return e.pricePnlPct; }),
       avgNet: avgNullable(shortPays, function(e) { return e.netReturn; }),
     },
@@ -335,9 +335,9 @@ function EpisodeTable(props: { episodes: BacktestEpisode[] }) {
                     </span>
                   </td>
                   <td style={{ padding: "6px 6px", color: C.o, fontWeight: 600 }}>{fmtAPR(ep.peakAPR)}</td>
-                  <td style={{ padding: "6px 6px", color: C.txM }}>{(ep.holdHours || ep.durationHours).toFixed(1)}h</td>
+                  <td style={{ padding: "6px 6px", color: C.txM }}>{(ep.holdHours || 0).toFixed(1)}h</td>
                   <td style={{ padding: "6px 6px", color: ep.revertedBelow100 ? C.g : C.r }}>{ep.revertedBelow100 ? "YES" : "NO"}</td>
-                  <td style={{ padding: "6px 6px", color: C.g }}>{((ep.cumulativeFundingHold || ep.cumulativeFunding7d) * 100).toFixed(4)}%</td>
+                  <td style={{ padding: "6px 6px", color: C.g }}>{((ep.cumulativeFundingHold || 0) * 100).toFixed(4)}%</td>
                   <td style={{ padding: "6px 6px", color: C.txM }}>{fmtPrice(ep.priceAtEntry)}</td>
                   <td style={{ padding: "6px 6px", color: C.txM }}>{fmtPrice(ep.priceAtExit)}</td>
                   <td style={{ padding: "6px 6px", color: priceColor, fontWeight: 600 }}>{fmtPct(ep.pricePnlPct)}</td>

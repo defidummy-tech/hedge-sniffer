@@ -63,12 +63,22 @@ function ConfigSlider(props: { label: string; value: number; onChange: (v: numbe
   );
 }
 
-function PositionRow(props: { trade: BotTrade }) {
+function PositionRow(props: { trade: BotTrade; fundingAPR?: number }) {
   var t = props.trade;
   var pnlColor = t.pnl >= 0 ? C.g : C.r;
   var holdHours = t.exitTime
     ? ((t.exitTime - t.entryTime) / 3600000).toFixed(1)
     : ((Date.now() - t.entryTime) / 3600000).toFixed(1);
+
+  // Determine if current funding rate still favors our position
+  var apr = props.fundingAPR;
+  var fundingColor = C.txD;
+  var fundingText = "-";
+  if (apr !== undefined) {
+    var favorsUs = (t.direction === "short" && apr > 0) || (t.direction === "long" && apr < 0);
+    fundingColor = favorsUs ? C.g : C.r;
+    fundingText = (apr * 100).toFixed(0) + "%";
+  }
 
   return (
     <tr style={{ borderBottom: "1px solid " + C.b + "40" }}>
@@ -86,7 +96,8 @@ function PositionRow(props: { trade: BotTrade }) {
       <td style={{ padding: "6px 6px", color: C.txM }}>{t.leverage}x</td>
       <td style={{ padding: "6px 6px", color: C.txM }}>${t.entryPrice.toFixed(2)}</td>
       <td style={{ padding: "6px 6px", color: pnlColor, fontWeight: 600 }}>${t.pnl.toFixed(2)}</td>
-      <td style={{ padding: "6px 6px", color: C.g }}>${t.fundingEarned.toFixed(4)}</td>
+      <td style={{ padding: "6px 6px", color: t.fundingEarned >= 0 ? C.g : C.r }}>${t.fundingEarned.toFixed(4)}</td>
+      <td style={{ padding: "6px 6px", color: fundingColor, fontWeight: 600 }}>{fundingText}</td>
       <td style={{ padding: "6px 6px", color: C.txM }}>{holdHours}h</td>
       <td style={{ padding: "6px 6px" }}>
         <span style={{
@@ -112,6 +123,7 @@ export default function BotView() {
   var [statusMsg, setStatusMsg] = useState<string | null>(null);
   var [walletAddress, setWalletAddress] = useState<string>("");
   var [accountError, setAccountError] = useState<string>("");
+  var [fundingRates, setFundingRates] = useState<Record<string, number>>({});
 
   // Fetch bot status
   var fetchStatus = useCallback(async function() {
@@ -126,6 +138,7 @@ export default function BotView() {
         if (json.walletAddress) setWalletAddress(json.walletAddress);
         if (json.accountError) setAccountError(json.accountError);
         else setAccountError("");
+        if (json.fundingRates) setFundingRates(json.fundingRates);
       }
     } catch (e: any) {
       // API doesn't exist yet — that's OK
@@ -354,13 +367,13 @@ export default function BotView() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid " + C.b }}>
-                      {["Coin", "Dir", "Size", "Lev", "Entry", "PnL", "Funding", "Hold", "Status"].map(function(h) {
+                      {["Coin", "Dir", "Size", "Lev", "Entry", "PnL", "Funding", "Live APR", "Hold", "Status"].map(function(h) {
                         return <th key={h} style={{ padding: "5px 6px", textAlign: "left", color: C.txD, fontWeight: 600, fontSize: 8, textTransform: "uppercase" }}>{h}</th>;
                       })}
                     </tr>
                   </thead>
                   <tbody>
-                    {positions.map(function(t) { return <PositionRow key={t.id} trade={t} />; })}
+                    {positions.map(function(t) { return <PositionRow key={t.id} trade={t} fundingAPR={fundingRates[t.coin]} />; })}
                   </tbody>
                 </table>
               </div>

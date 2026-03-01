@@ -86,15 +86,44 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
 
     journal.logAction("KILL", "Found " + livePositions.length + " live position(s) to close");
 
+    // Get mid prices for manual close fallback
+    var mids = await hl.info.getAllMids();
+
     for (var pos of livePositions) {
       var coin = pos.position.coin;
+      var szi = parseFloat(pos.position.szi);
+      var closeSize = Math.abs(szi);
+      var isBuy = szi < 0; // if short (negative size), buy to close
       try {
         await hl.custom.marketClose(coin);
         closed.push(coin);
         journal.logAction("KILL", "Closed " + coin);
       } catch (e: any) {
-        errors.push(coin + ": " + e.message);
-        journal.logAction("ERROR", "Kill close " + coin + ": " + e.message);
+        journal.logAction("WARN", "marketClose " + coin + " failed: " + e.message + " — trying manual close");
+
+        // Fallback: manual close using exchange.placeOrder directly
+        // This bypasses the SDK's internal symbol matching which can fail for some coins (e.g. ETH)
+        try {
+          var midPrice = parseFloat(mids[coin] || "0");
+          if (midPrice <= 0) throw new Error("No mid price for " + coin);
+
+          var limitPrice = isBuy ? midPrice * 1.05 : midPrice * 0.95;
+
+          await hl.exchange.placeOrder({
+            coin: coin + "-PERP",
+            is_buy: isBuy,
+            sz: closeSize,
+            limit_px: limitPrice.toString(),
+            order_type: { limit: { tif: "Ioc" as any } },
+            reduce_only: true,
+          });
+
+          closed.push(coin);
+          journal.logAction("KILL", "Closed " + coin + " (manual fallback)");
+        } catch (e2: any) {
+          errors.push(coin + ": " + e2.message);
+          journal.logAction("ERROR", "Manual close " + coin + " also failed: " + e2.message);
+        }
       }
     }
   } catch (e: any) {
@@ -219,13 +248,41 @@ async function checkExistingPositions(
 
       if (exitReason) {
         // Close the position via market order
+        var closedOk = false;
         try {
           await hl.custom.marketClose(trade.coin);
+          closedOk = true;
+        } catch (e: any) {
+          journal.logAction("WARN", "marketClose " + trade.coin + " failed: " + e.message + " — trying manual close");
+
+          // Fallback: manual close using exchange.placeOrder directly
+          try {
+            var closeSzi = pos ? parseFloat(pos.position.szi) : 0;
+            var closeSz = Math.abs(closeSzi);
+            var closeIsBuy = closeSzi < 0;
+            var closeLimitPx = closeIsBuy ? midPrice * 1.05 : midPrice * 0.95;
+
+            if (closeSz > 0) {
+              await hl.exchange.placeOrder({
+                coin: trade.coin + "-PERP",
+                is_buy: closeIsBuy,
+                sz: closeSz,
+                limit_px: closeLimitPx.toString(),
+                order_type: { limit: { tif: "Ioc" as any } },
+                reduce_only: true,
+              });
+              closedOk = true;
+              journal.logAction("CLOSE", trade.coin + " closed via manual fallback");
+            }
+          } catch (e2: any) {
+            journal.logAction("ERROR", "Manual close " + trade.coin + ": " + e2.message);
+            result.errors.push("Close " + trade.coin + ": " + e2.message);
+          }
+        }
+
+        if (closedOk) {
           journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding);
           result.closed.push(trade.coin + ":" + exitReason);
-        } catch (e: any) {
-          journal.logAction("ERROR", "Close " + trade.coin + ": " + e.message);
-          result.errors.push("Close " + trade.coin + ": " + e.message);
         }
       }
     } catch (e: any) {
@@ -351,6 +408,42 @@ async function scanForOpportunities(
       };
 
       journal.addTrade(trade);
+
+      // Place stop-loss order directly on Hyperliquid for instant execution
+      try {
+        var priceMoveThreshold = config.stopLossPct / (lev * 100);
+        var stopPrice: number;
+        var slBuy: boolean;
+
+        if (opp.direction === "short") {
+          // SHORT position: stop-loss triggers when price RISES
+          stopPrice = fillPrice * (1 + priceMoveThreshold);
+          slBuy = true; // buy to close short
+        } else {
+          // LONG position: stop-loss triggers when price DROPS
+          stopPrice = fillPrice * (1 - priceMoveThreshold);
+          slBuy = false; // sell to close long
+        }
+
+        // Aggressive limit price to guarantee fill when trigger hits
+        var slLimitPx = slBuy ? stopPrice * 1.10 : stopPrice * 0.90;
+
+        await hl.exchange.placeOrder({
+          coin: opp.coin + "-PERP",
+          is_buy: slBuy,
+          sz: size,
+          limit_px: slLimitPx.toString(),
+          order_type: { trigger: { triggerPx: stopPrice.toString(), isMarket: true, tpsl: "sl" as any } },
+          reduce_only: true,
+          grouping: "normalTpsl",
+        });
+
+        journal.logAction("SL", opp.coin + " stop-loss set at $" + stopPrice.toFixed(2) + " (" + config.stopLossPct + "% loss)");
+      } catch (slErr: any) {
+        // Don't fail the whole trade — SL is best-effort; cron tick also checks
+        journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
+      }
+
       result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2));
       openCount++;
 
@@ -473,4 +566,28 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
   }
 
   return result;
+}
+
+// ── Get current funding rates for all perps ──
+export async function getFundingRates(): Promise<Record<string, number>> {
+  var config = journal.getConfig();
+  var rates: Record<string, number> = {};
+
+  try {
+    var hl = await getSDK(config);
+    var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+    var meta = metaCtx[0];
+    var assetCtxs = metaCtx[1];
+
+    meta.universe.forEach(function(u: any, i: number) {
+      var ctx = assetCtxs[i];
+      if (ctx && ctx.funding) {
+        rates[u.name] = parseFloat(ctx.funding) * 8760; // APR
+      }
+    });
+  } catch (e: any) {
+    journal.logAction("ERROR", "getFundingRates: " + e.message);
+  }
+
+  return rates;
 }

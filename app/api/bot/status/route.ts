@@ -3,7 +3,7 @@
 
 import { NextResponse } from "next/server";
 import * as journal from "../../../services/tradeJournal";
-import { getAccountStatus } from "../../../services/tradingBot";
+import { getAccountStatus, getFundingRates } from "../../../services/tradingBot";
 
 export var dynamic = "force-dynamic";
 
@@ -21,6 +21,16 @@ export async function GET() {
       account.error = e.message || "Unknown error";
     }
 
+    // Fetch live funding rates for open positions
+    var fundingRates: Record<string, number> = {};
+    if (openTrades.length > 0) {
+      try {
+        fundingRates = await getFundingRates();
+      } catch (e: any) {
+        // Non-critical — positions still work without live funding
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       config: config,
@@ -32,6 +42,7 @@ export async function GET() {
       walletAddress: account.walletAddress,
       accountError: account.error || null,
       debug: account.debug || null,
+      fundingRates: fundingRates,
     });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e.message }, { status: 500 });

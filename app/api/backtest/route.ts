@@ -67,8 +67,8 @@ function findPrice(candles: any[], targetTime: number): number | null {
     }
   }
 
-  // Only accept if within 2 hours of target
-  if (closest && closestDiff < 7200000) {
+  // Accept if within 6 hours of target (increased from 2h to handle data gaps)
+  if (closest && closestDiff < 21600000) {
     return parseFloat(closest.c); // close price
   }
   return null;
@@ -191,11 +191,12 @@ function analyzeEpisode(
 
   // ── Determine realistic hold period ──
   // Bot would exit when funding reverts below exit threshold, or at max hold (7 days)
+  // Minimum 1 hour: bot can't detect + open + close faster than one funding period
   var holdHours: number;
   if (stillActive) {
-    holdHours = durationHours; // still open, use current duration
+    holdHours = Math.max(1, durationHours); // still open, use current duration
   } else if (revertedBelow100 && revertHours !== null) {
-    holdHours = revertHours; // exited when funding reverted
+    holdHours = Math.max(1, revertHours); // exited when funding reverted
   } else {
     holdHours = MAX_HOLD_HOURS; // stayed elevated, capped at max hold
   }
