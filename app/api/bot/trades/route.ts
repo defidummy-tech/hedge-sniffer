@@ -1,14 +1,41 @@
 // ═══ Bot Trades API ═══
 // Returns all trades (open and closed) for the performance dashboard.
+// Open trades are enriched with live P&L data from Hyperliquid.
 
 import { NextResponse } from "next/server";
 import * as journal from "../../../services/tradeJournal";
+import { getPositionDetails } from "../../../services/tradingBot";
 
 export var dynamic = "force-dynamic";
 
 export async function GET() {
   try {
     var trades = journal.getAllTrades();
+
+    // Enrich open trades with live P&L from Hyperliquid
+    var openTrades = trades.filter(function(t) { return t.status === "open"; });
+    if (openTrades.length > 0) {
+      try {
+        var liveDetails = await getPositionDetails();
+        for (var i = 0; i < trades.length; i++) {
+          if (trades[i].status !== "open") continue;
+          var details = liveDetails[trades[i].coin];
+          if (details) {
+            trades[i] = {
+              ...trades[i],
+              exitPrice: details.midPrice,
+              pnl: details.unrealizedPnl,
+              fundingEarned: details.cumFunding,
+              totalReturn: details.unrealizedPnl + details.cumFunding,
+            };
+          }
+        }
+      } catch (e: any) {
+        // Live data fetch failed — return trades with zeros for open positions
+        console.error("Live P&L fetch failed:", e.message);
+      }
+    }
+
     var open = trades.filter(function(t) { return t.status === "open"; });
     var closed = trades.filter(function(t) { return t.status !== "open"; });
 
