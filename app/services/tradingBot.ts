@@ -200,14 +200,21 @@ async function checkExistingPositions(
 
       var exitReason: string | null = null;
 
+      // Check if funding direction still favors our position
+      var rawAPR = fundingMap[trade.coin] || 0; // signed APR (positive = longs pay, negative = shorts pay)
+      var fundingFavorsUs = (trade.direction === "short" && rawAPR > 0) || // we're SHORT & longs pay us
+                            (trade.direction === "long" && rawAPR < 0);   // we're LONG & shorts pay us
+
       // Check exit conditions
       var lossPct = Math.abs(unrealizedPnl) / trade.sizeUSD * 100;
       if (unrealizedPnl < 0 && lossPct > config.stopLossPct) {
         exitReason = "stop_loss";
       } else if (holdHours > config.maxHoldHours) {
         exitReason = "max_hold";
+      } else if (!fundingFavorsUs) {
+        exitReason = "funding_flipped"; // funding direction changed — we're now paying
       } else if (currentAPR < config.exitAPR) {
-        exitReason = "funding_reverted";
+        exitReason = "funding_reverted"; // magnitude dropped below exit threshold
       }
 
       if (exitReason) {
