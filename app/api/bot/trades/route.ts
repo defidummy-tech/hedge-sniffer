@@ -23,7 +23,7 @@ export async function GET() {
           if (details) {
             trades[i] = {
               ...trades[i],
-              exitPrice: details.midPrice,
+              // Don't set exitPrice — trade is still open, keep it null
               pnl: details.unrealizedPnl,
               fundingEarned: details.cumFunding,
               totalReturn: details.unrealizedPnl + details.cumFunding,

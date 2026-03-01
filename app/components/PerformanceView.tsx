@@ -215,7 +215,7 @@ function TradeHistory(props: { trades: BotTrade[] }) {
                   <td style={{ padding: "6px 6px", color: C.txM }}>${t.entryPrice.toFixed(2)}</td>
                   <td style={{ padding: "6px 6px", color: C.txM }}>{t.exitPrice ? "$" + t.exitPrice.toFixed(2) : "-"}</td>
                   <td style={{ padding: "6px 6px", color: t.pnl >= 0 ? C.g : C.r, fontWeight: 600 }}>${t.pnl.toFixed(2)}</td>
-                  <td style={{ padding: "6px 6px", color: C.g }}>${t.fundingEarned.toFixed(4)}</td>
+                  <td style={{ padding: "6px 6px", color: t.fundingEarned >= 0 ? C.g : C.r }}>${t.fundingEarned.toFixed(4)}</td>
                   <td style={{ padding: "6px 6px", color: totalColor, fontWeight: 700 }}>${t.totalReturn.toFixed(2)}</td>
                   <td style={{ padding: "6px 6px", color: C.txD }}>{t.exitReason || "-"}</td>
                   <td style={{ padding: "6px 6px" }}>
