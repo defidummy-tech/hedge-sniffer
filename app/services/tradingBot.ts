@@ -65,7 +65,7 @@ function genId(): string {
 
 // ── Close ALL open positions on Hyperliquid ──
 export async function closeAllPositions(): Promise<{ closed: string[]; errors: string[] }> {
-  var config = journal.getConfig();
+  var config = await journal.getConfig();
   var closed: string[] = [];
   var errors: string[] = [];
 
@@ -134,6 +134,57 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
   return { closed: closed, errors: errors };
 }
 
+// ── Recover positions from Hyperliquid that aren't in the journal ──
+// This handles the case where the server restarts and Redis/files are empty
+// but positions are still open on the exchange.
+async function recoverOrphanedPositions(hl: Hyperliquid, config: BotConfig): Promise<void> {
+  var openTrades = await journal.getOpenTrades();
+  var knownCoins = new Set(openTrades.map(function(t) { return t.coin; }));
+
+  var walletAddr = getWalletAddress();
+  var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
+
+  var livePositions = state.assetPositions.filter(function(p) {
+    return parseFloat(p.position.szi) !== 0;
+  });
+
+  for (var pos of livePositions) {
+    var coin = pos.position.coin;
+    if (knownCoins.has(coin)) continue; // already tracked
+
+    // This position exists on HL but not in our journal — recover it
+    var szi = parseFloat(pos.position.szi);
+    var direction: "long" | "short" = szi > 0 ? "long" : "short";
+    var entryPx = parseFloat(pos.position.entryPx);
+    var leverage = pos.position.leverage ? pos.position.leverage.value : config.leverage;
+
+    var recoveredTrade: BotTrade = {
+      id: genId(),
+      coin: coin,
+      direction: direction,
+      sizeUSD: Math.abs(szi * entryPx / leverage),
+      leverage: leverage,
+      entryPrice: entryPx,
+      entryTime: Date.now() - 3600000, // approximate — we don't know actual entry time
+      entryFundingAPR: 0,
+      exitPrice: null,
+      exitTime: null,
+      exitFundingAPR: null,
+      exitReason: null,
+      pnl: 0,
+      fundingEarned: 0,
+      totalReturn: 0,
+      status: "open",
+      spotHedge: false,
+      spotEntryPrice: null,
+      spotExitPrice: null,
+    };
+
+    await journal.addTrade(recoveredTrade);
+    journal.logAction("RECOVER", "Recovered orphaned " + direction.toUpperCase() + " " + coin + " position (entry $" + entryPx.toFixed(2) + ")");
+  }
+}
+
 // ── Main bot tick ──
 export async function botTick(): Promise<{
   scanned: number;
@@ -142,7 +193,7 @@ export async function botTick(): Promise<{
   skipped: string[];
   errors: string[];
 }> {
-  var config = journal.getConfig();
+  var config = await journal.getConfig();
   var result = { scanned: 0, opened: [] as string[], closed: [] as string[], skipped: [] as string[], errors: [] as string[] };
 
   if (!config.enabled) {
@@ -163,6 +214,13 @@ export async function botTick(): Promise<{
     journal.logAction("ERROR", "SDK init: " + e.message);
     result.errors.push("SDK init: " + e.message);
     return result;
+  }
+
+  // ── Step 0: Recover orphaned positions (journal lost but HL has positions) ──
+  try {
+    await recoverOrphanedPositions(hl, config);
+  } catch (e: any) {
+    journal.logAction("ERROR", "Position recovery: " + e.message);
   }
 
   // ── Step 1: Check existing positions & close if needed ──
@@ -190,7 +248,7 @@ async function checkExistingPositions(
   config: BotConfig,
   result: { closed: string[]; errors: string[] }
 ): Promise<void> {
-  var openTrades = journal.getOpenTrades();
+  var openTrades = await journal.getOpenTrades();
   if (openTrades.length === 0) return;
 
   // Get account state
@@ -281,7 +339,7 @@ async function checkExistingPositions(
         }
 
         if (closedOk) {
-          journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding);
+          await journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding);
           result.closed.push(trade.coin + ":" + exitReason);
         }
       }
@@ -297,7 +355,7 @@ async function scanForOpportunities(
   config: BotConfig,
   result: { scanned: number; opened: string[]; skipped: string[]; errors: string[] }
 ): Promise<void> {
-  var openCount = journal.getOpenTrades().length;
+  var openCount = (await journal.getOpenTrades()).length;
   if (openCount >= config.maxPositions) {
     journal.logAction("SCAN", "Max positions reached (" + openCount + "/" + config.maxPositions + ")");
     return;
@@ -351,7 +409,7 @@ async function scanForOpportunities(
     if (openCount >= config.maxPositions) break;
 
     // Skip if already have position
-    if (journal.isAlreadyOpen(opp.coin)) {
+    if (await journal.isAlreadyOpen(opp.coin)) {
       result.skipped.push(opp.coin + ":already_open");
       continue;
     }
@@ -407,7 +465,7 @@ async function scanForOpportunities(
         spotExitPrice: null,
       };
 
-      journal.addTrade(trade);
+      await journal.addTrade(trade);
 
       // Place stop-loss order directly on Hyperliquid for instant execution
       try {
@@ -463,7 +521,7 @@ export async function getAccountStatus(): Promise<{
   error: string;
   debug: Record<string, any>;
 }> {
-  var config = journal.getConfig();
+  var config = await journal.getConfig();
   var walletAddr = "";
   var debug: Record<string, any> = { testnetConfig: config.testnet };
 
@@ -540,7 +598,7 @@ export async function getAccountStatus(): Promise<{
 
 // ── Get live position P&L details (for kill switch) ──
 export async function getPositionDetails(): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
-  var config = journal.getConfig();
+  var config = await journal.getConfig();
   var result: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> = {};
 
   try {
@@ -570,7 +628,7 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
 
 // ── Get current funding rates for all perps ──
 export async function getFundingRates(): Promise<Record<string, number>> {
-  var config = journal.getConfig();
+  var config = await journal.getConfig();
   var rates: Record<string, number> = {};
 
   try {

@@ -8,14 +8,14 @@ import * as journal from "../../../services/tradeJournal";
 export async function GET() {
   return NextResponse.json({
     ok: true,
-    config: journal.getConfig(),
+    config: await journal.getConfig(),
   });
 }
 
 export async function POST(req: NextRequest) {
   try {
     var body = await req.json();
-    var updated = journal.updateConfig(body);
+    var updated = await journal.updateConfig(body);
 
     journal.logAction("CONFIG", "Updated: " + Object.keys(body).join(", "));
 

@@ -10,7 +10,7 @@ export var dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    var trades = journal.getAllTrades();
+    var trades = await journal.getAllTrades();
 
     // Enrich open trades with live P&L from Hyperliquid
     var openTrades = trades.filter(function(t) { return t.status === "open"; });

@@ -9,8 +9,8 @@ export var dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    var config = journal.getConfig();
-    var openTrades = journal.getOpenTrades();
+    var config = await journal.getConfig();
+    var openTrades = await journal.getOpenTrades();
     var recentActions = journal.getRecentActions(50);
 
     // Try to get live account data

@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
 
   try {
     // 1. Disable the bot immediately
-    journal.updateConfig({ enabled: false });
+    await journal.updateConfig({ enabled: false });
     journal.logAction("KILL", "Kill switch activated — closing all positions");
 
     // 2. Fetch live P&L data BEFORE closing positions
@@ -31,11 +31,11 @@ export async function POST(req: NextRequest) {
     errors = result.errors;
 
     // 4. Mark all journal trades as closed with actual P&L
-    var openTrades = journal.getOpenTrades();
+    var openTrades = await journal.getOpenTrades();
     for (var trade of openTrades) {
       var details = pnlDetails[trade.coin];
       if (details) {
-        journal.closeTrade(
+        await journal.closeTrade(
           trade.id,
           details.midPrice,
           0,
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
         );
       } else {
         // Fallback: no live data available
-        journal.closeTrade(trade.id, trade.entryPrice, 0, "kill_switch", 0, 0);
+        await journal.closeTrade(trade.id, trade.entryPrice, 0, "kill_switch", 0, 0);
       }
     }
 

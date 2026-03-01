@@ -41,25 +41,29 @@ export async function GET(req: NextRequest) {
     var result = await botTick();
     var elapsed = ((Date.now() - start) / 1000).toFixed(1) + "s";
 
+    var cfg = await journal.getConfig();
+    var openPos = await journal.getOpenTrades();
+    var allTrades = await journal.getAllTrades();
+
     return NextResponse.json({
       ok: true,
       elapsed: elapsed,
       config: {
-        enabled: journal.getConfig().enabled,
-        testnet: journal.getConfig().testnet,
-        entryAPR: (journal.getConfig().entryAPR * 100).toFixed(0) + "%",
-        exitAPR: (journal.getConfig().exitAPR * 100).toFixed(0) + "%",
-        maxPosition: "$" + journal.getConfig().maxPositionUSD,
-        leverage: journal.getConfig().leverage + "x",
-        maxPositions: journal.getConfig().maxPositions,
+        enabled: cfg.enabled,
+        testnet: cfg.testnet,
+        entryAPR: (cfg.entryAPR * 100).toFixed(0) + "%",
+        exitAPR: (cfg.exitAPR * 100).toFixed(0) + "%",
+        maxPosition: "$" + cfg.maxPositionUSD,
+        leverage: cfg.leverage + "x",
+        maxPositions: cfg.maxPositions,
       },
       scanned: result.scanned,
       opened: result.opened,
       closed: result.closed,
       skipped: result.skipped,
       errors: result.errors,
-      openPositions: journal.getOpenTrades().length,
-      totalTrades: journal.getAllTrades().length,
+      openPositions: openPos.length,
+      totalTrades: allTrades.length,
     });
   } catch (e: any) {
     journal.logAction("ERROR", "Tick failed: " + e.message);
