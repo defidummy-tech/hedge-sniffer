@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 var HL_API = "https://api.hyperliquid.xyz/info";
 var HOURS_PER_YEAR = 8760;
 var LOOKBACK_WINDOWS = [1, 4, 12, 24, 48, 168];
+var MAX_HOLD_HOURS = 7 * 24; // 168h max hold (matches bot default)
 
 async function hlFetch(body: any): Promise<any> {
   var res = await fetch(HL_API, {
@@ -86,10 +87,12 @@ interface Episode {
   revertedBelow100: boolean;
   revertHours: number | null;
   cumulativeFunding7d: number;
+  holdHours: number;
+  cumulativeFundingHold: number;
   priceAtEntry: number | null;
-  priceAfter7d: number | null;
+  priceAtExit: number | null;
   pricePnlPct: number | null;
-  netReturn7d: number | null;
+  netReturn: number | null;
 }
 
 function identifyAndAnalyzeEpisodes(
@@ -171,7 +174,7 @@ function analyzeEpisode(
     }
   }
 
-  // Reversion check
+  // Reversion check — when does funding drop below 100% APR?
   var revertedBelow100 = false;
   var revertHours: number | null = null;
   var sevenDaysAfter = startTime + 7 * 24 * 3600000;
@@ -186,30 +189,51 @@ function analyzeEpisode(
     }
   }
 
-  // Cumulative funding
-  var cumRate = 0;
+  // ── Determine realistic hold period ──
+  // Bot would exit when funding reverts below exit threshold, or at max hold (7 days)
+  var holdHours: number;
+  if (stillActive) {
+    holdHours = durationHours; // still open, use current duration
+  } else if (revertedBelow100 && revertHours !== null) {
+    holdHours = revertHours; // exited when funding reverted
+  } else {
+    holdHours = MAX_HOLD_HOURS; // stayed elevated, capped at max hold
+  }
+
+  var exitTime = startTime + holdHours * 3600000;
+
+  // Cumulative funding over full 7 days (kept for reference)
+  var cumRate7d = 0;
   for (var ci = 0; ci < history.length; ci++) {
     if (history[ci].time >= startTime && history[ci].time <= startTime + 7 * 24 * 3600000) {
-      cumRate += Math.abs(parseFloat(history[ci].fundingRate));
+      cumRate7d += Math.abs(parseFloat(history[ci].fundingRate));
     }
   }
 
-  // ── Price impact calculation ──
+  // Cumulative funding over actual hold period
+  var cumRateHold = 0;
+  for (var ch = 0; ch < history.length; ch++) {
+    if (history[ch].time >= startTime && history[ch].time <= exitTime) {
+      cumRateHold += Math.abs(parseFloat(history[ch].fundingRate));
+    }
+  }
+
+  // ── Price impact over hold period ──
   var priceAtEntry = findPrice(candles, startTime);
-  var priceAfter7d = findPrice(candles, startTime + 7 * 24 * 3600000);
+  var priceAtExit = findPrice(candles, exitTime);
 
   var pricePnlPct: number | null = null;
-  var netReturn7d: number | null = null;
+  var netReturn: number | null = null;
 
-  if (priceAtEntry !== null && priceAfter7d !== null && priceAtEntry > 0) {
+  if (priceAtEntry !== null && priceAtExit !== null && priceAtEntry > 0) {
     if (direction === "long-pays") {
       // We go SHORT: profit when price drops
-      pricePnlPct = (priceAtEntry - priceAfter7d) / priceAtEntry;
+      pricePnlPct = (priceAtEntry - priceAtExit) / priceAtEntry;
     } else {
       // We go LONG: profit when price rises
-      pricePnlPct = (priceAfter7d - priceAtEntry) / priceAtEntry;
+      pricePnlPct = (priceAtExit - priceAtEntry) / priceAtEntry;
     }
-    netReturn7d = cumRate + pricePnlPct;
+    netReturn = cumRateHold + pricePnlPct;
   }
 
   return {
@@ -222,11 +246,13 @@ function analyzeEpisode(
     aprAfter: aprAfter,
     revertedBelow100: revertedBelow100,
     revertHours: revertHours,
-    cumulativeFunding7d: cumRate,
+    cumulativeFunding7d: cumRate7d,
+    holdHours: holdHours,
+    cumulativeFundingHold: cumRateHold,
     priceAtEntry: priceAtEntry,
-    priceAfter7d: priceAfter7d,
+    priceAtExit: priceAtExit,
     pricePnlPct: pricePnlPct,
-    netReturn7d: netReturn7d,
+    netReturn: netReturn,
   };
 }
 
@@ -288,7 +314,8 @@ export async function GET(request: Request) {
     var allEpisodes: Episode[] = [];
     var tokenSummaries: Array<{
       token: string; episodes: number; avgPeakAPR: number; avgDuration: number;
-      revertPct: number; avgEarnings7d: number; avgPricePnl7d: number; avgNetReturn7d: number;
+      revertPct: number; avgEarnings7d: number;
+      avgHoldHours: number; avgFundingHold: number; avgPricePnl: number; avgNetReturn: number;
     }> = [];
 
     for (var ti = 0; ti < top20.length; ti++) {
@@ -304,18 +331,21 @@ export async function GET(request: Request) {
 
       // Token summary
       var sumPeak = 0, sumDur = 0, sumEarn = 0, revCount = 0;
+      var sumHold = 0, sumFundHold = 0;
       var sumPricePnl = 0, pricePnlCount = 0, sumNetReturn = 0, netReturnCount = 0;
       for (var ei = 0; ei < episodes.length; ei++) {
         sumPeak += episodes[ei].peakAPR;
         sumDur += episodes[ei].durationHours;
         sumEarn += episodes[ei].cumulativeFunding7d;
+        sumHold += episodes[ei].holdHours;
+        sumFundHold += episodes[ei].cumulativeFundingHold;
         if (episodes[ei].revertedBelow100) revCount++;
         if (episodes[ei].pricePnlPct !== null) {
           sumPricePnl += episodes[ei].pricePnlPct!;
           pricePnlCount++;
         }
-        if (episodes[ei].netReturn7d !== null) {
-          sumNetReturn += episodes[ei].netReturn7d!;
+        if (episodes[ei].netReturn !== null) {
+          sumNetReturn += episodes[ei].netReturn!;
           netReturnCount++;
         }
       }
@@ -326,8 +356,10 @@ export async function GET(request: Request) {
         avgDuration: sumDur / episodes.length,
         revertPct: (revCount / episodes.length) * 100,
         avgEarnings7d: sumEarn / episodes.length,
-        avgPricePnl7d: pricePnlCount > 0 ? sumPricePnl / pricePnlCount : 0,
-        avgNetReturn7d: netReturnCount > 0 ? sumNetReturn / netReturnCount : 0,
+        avgHoldHours: sumHold / episodes.length,
+        avgFundingHold: sumFundHold / episodes.length,
+        avgPricePnl: pricePnlCount > 0 ? sumPricePnl / pricePnlCount : 0,
+        avgNetReturn: netReturnCount > 0 ? sumNetReturn / netReturnCount : 0,
       });
     }
 
@@ -335,8 +367,10 @@ export async function GET(request: Request) {
     var durations = allEpisodes.map(function(e) { return e.durationHours; });
     var earnings = allEpisodes.map(function(e) { return e.cumulativeFunding7d; });
     var revertTimes = allEpisodes.filter(function(e) { return e.revertedBelow100 && e.revertHours !== null; }).map(function(e) { return e.revertHours!; });
+    var holdHoursList = allEpisodes.map(function(e) { return e.holdHours; });
+    var fundingHolds = allEpisodes.map(function(e) { return e.cumulativeFundingHold; });
     var pricePnls = allEpisodes.filter(function(e) { return e.pricePnlPct !== null; }).map(function(e) { return e.pricePnlPct!; });
-    var netReturns = allEpisodes.filter(function(e) { return e.netReturn7d !== null; }).map(function(e) { return e.netReturn7d!; });
+    var netReturns = allEpisodes.filter(function(e) { return e.netReturn !== null; }).map(function(e) { return e.netReturn!; });
 
     var avg = function(arr: number[]) { return arr.length ? arr.reduce(function(s, v) { return s + v; }, 0) / arr.length : 0; };
     var med = function(arr: number[]) {
@@ -371,9 +405,11 @@ export async function GET(request: Request) {
       revertPct: allEpisodes.length ? +(reverted.length / allEpisodes.length * 100).toFixed(1) : 0,
       avgEarnings7d: +avg(earnings).toFixed(6),
       medianEarnings7d: +med(earnings).toFixed(6),
-      avgPricePnl7d: +avg(pricePnls).toFixed(6),
-      avgNetReturn7d: +avg(netReturns).toFixed(6),
-      medianNetReturn7d: +med(netReturns).toFixed(6),
+      avgHoldHours: +avg(holdHoursList).toFixed(1),
+      avgFundingHold: +avg(fundingHolds).toFixed(6),
+      avgPricePnl: +avg(pricePnls).toFixed(6),
+      avgNetReturn: +avg(netReturns).toFixed(6),
+      medianNetReturn: +med(netReturns).toFixed(6),
     };
 
     var elapsed = Date.now() - startMs;

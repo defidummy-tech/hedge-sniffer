@@ -39,14 +39,13 @@ function SummaryCards(props: { data: any }) {
   var d = props.data;
   var cards = [
     { label: "Episodes", value: d.totalEpisodes, color: C.a, icon: "#" },
-    { label: "Avg Duration", value: d.avgDuration.toFixed(1) + "h", color: C.o, icon: "\u23F1" },
-    { label: "Med Duration", value: d.medianDuration.toFixed(1) + "h", color: C.o, icon: "\u23F0" },
+    { label: "Avg Hold", value: d.avgHoldHours.toFixed(1) + "h", color: C.o, icon: "\u23F1" },
     { label: "Revert <100%", value: d.revertPct.toFixed(1) + "%", color: C.g, icon: "\u21B5" },
     { label: "Avg Revert Time", value: d.avgRevertHours.toFixed(1) + "h", color: C.p, icon: "\u21BA" },
-    { label: "Avg 7d Funding", value: (d.avgEarnings7d * 100).toFixed(4) + "%", color: C.g, icon: "\uD83D\uDCB0" },
-    { label: "Avg Price P&L", value: (d.avgPricePnl7d * 100).toFixed(4) + "%", color: d.avgPricePnl7d >= 0 ? C.g : C.r, icon: "\uD83D\uDCC9" },
-    { label: "Avg Net Return", value: (d.avgNetReturn7d * 100).toFixed(4) + "%", color: d.avgNetReturn7d >= 0 ? C.g : C.r, icon: "\uD83D\uDCCA" },
-    { label: "Med Net Return", value: (d.medianNetReturn7d * 100).toFixed(4) + "%", color: d.medianNetReturn7d >= 0 ? C.g : C.r, icon: "\u03BC" },
+    { label: "Hold Funding", value: (d.avgFundingHold * 100).toFixed(4) + "%", color: C.g, icon: "\uD83D\uDCB0" },
+    { label: "Avg Price P&L", value: (d.avgPricePnl * 100).toFixed(4) + "%", color: d.avgPricePnl >= 0 ? C.g : C.r, icon: "\uD83D\uDCC9" },
+    { label: "Avg Net Return", value: (d.avgNetReturn * 100).toFixed(4) + "%", color: d.avgNetReturn >= 0 ? C.g : C.r, icon: "\uD83D\uDCCA" },
+    { label: "Med Net Return", value: (d.medianNetReturn * 100).toFixed(4) + "%", color: d.medianNetReturn >= 0 ? C.g : C.r, icon: "\u03BC" },
   ];
   return (
     <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 14 }}>
@@ -108,7 +107,7 @@ function TokenTable(props: { summaries: any[] }) {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "monospace" }}>
           <thead>
             <tr style={{ borderBottom: "1px solid " + C.b }}>
-              {["Token", "Episodes", "Avg Peak APR", "Avg Duration", "Revert %", "Avg 7d Fund", "Avg Price P&L", "Avg Net Return"].map(function(h) {
+              {["Token", "Episodes", "Avg Peak APR", "Avg Hold", "Revert %", "Hold Funding", "Price P&L", "Net Return"].map(function(h) {
                 return <th key={h} style={{ padding: "6px 8px", textAlign: "left", color: C.txD, fontWeight: 600, fontSize: 9, textTransform: "uppercase" }}>{h}</th>;
               })}
             </tr>
@@ -120,11 +119,11 @@ function TokenTable(props: { summaries: any[] }) {
                   <td style={{ padding: "8px 8px", color: C.a, fontWeight: 700 }}>{t.token}</td>
                   <td style={{ padding: "8px 8px", color: C.tx }}>{t.episodes}</td>
                   <td style={{ padding: "8px 8px", color: C.o, fontWeight: 600 }}>{fmtAPR(t.avgPeakAPR)}</td>
-                  <td style={{ padding: "8px 8px", color: C.txM }}>{t.avgDuration.toFixed(1)}h</td>
+                  <td style={{ padding: "8px 8px", color: C.txM }}>{t.avgHoldHours.toFixed(1)}h</td>
                   <td style={{ padding: "8px 8px", color: t.revertPct > 60 ? C.g : C.r, fontWeight: 600 }}>{t.revertPct.toFixed(0)}%</td>
-                  <td style={{ padding: "8px 8px", color: C.g }}>{(t.avgEarnings7d * 100).toFixed(4)}%</td>
-                  <td style={{ padding: "8px 8px", color: t.avgPricePnl7d >= 0 ? C.g : C.r, fontWeight: 600 }}>{(t.avgPricePnl7d * 100).toFixed(4)}%</td>
-                  <td style={{ padding: "8px 8px", color: t.avgNetReturn7d >= 0 ? C.g : C.r, fontWeight: 700 }}>{(t.avgNetReturn7d * 100).toFixed(4)}%</td>
+                  <td style={{ padding: "8px 8px", color: C.g }}>{(t.avgFundingHold * 100).toFixed(4)}%</td>
+                  <td style={{ padding: "8px 8px", color: t.avgPricePnl >= 0 ? C.g : C.r, fontWeight: 600 }}>{(t.avgPricePnl * 100).toFixed(4)}%</td>
+                  <td style={{ padding: "8px 8px", color: t.avgNetReturn >= 0 ? C.g : C.r, fontWeight: 700 }}>{(t.avgNetReturn * 100).toFixed(4)}%</td>
                 </tr>
               );
             })}
@@ -193,7 +192,7 @@ function NetReturnDistribution(props: { episodes: BacktestEpisode[] }) {
 
   // Use net return where available, fall back to funding only
   var returns = props.episodes.map(function(e) {
-    return (e.netReturn7d !== null ? e.netReturn7d : e.cumulativeFunding7d) * 100;
+    return (e.netReturn !== null ? e.netReturn : e.cumulativeFundingHold) * 100;
   });
   var min = Math.min.apply(null, returns);
   var max = Math.max.apply(null, returns);
@@ -212,9 +211,9 @@ function NetReturnDistribution(props: { episodes: BacktestEpisode[] }) {
   return (
     <div style={{ background: C.s, border: "1px solid " + C.b, borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <div style={{ fontSize: 13, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, marginBottom: 4 }}>
-        <span style={{ color: C.g }}>7-Day Net Return</span> Distribution
+        <span style={{ color: C.g }}>Net Return</span> Distribution
       </div>
-      <div style={{ fontSize: 10, color: C.txM, marginBottom: 10 }}>Net return (funding earned + price P&L) over 7 days after each episode start</div>
+      <div style={{ fontSize: 10, color: C.txM, marginBottom: 10 }}>Net return (funding earned + price P&L) over actual hold period per episode</div>
       <ResponsiveContainer width="100%" height={200}>
         <BarChart data={buckets} margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.b} />
@@ -241,31 +240,34 @@ function DirectionBreakdown(props: { episodes: BacktestEpisode[] }) {
   var longPays = props.episodes.filter(function(e) { return e.direction === "long-pays"; });
   var shortPays = props.episodes.filter(function(e) { return e.direction === "short-pays"; });
 
-  var avgEarn = function(arr: BacktestEpisode[]) {
+  var avgVal = function(arr: BacktestEpisode[], fn: (e: BacktestEpisode) => number) {
     if (arr.length === 0) return 0;
-    return arr.reduce(function(s, e) { return s + e.cumulativeFunding7d; }, 0) / arr.length;
+    return arr.reduce(function(s, e) { return s + fn(e); }, 0) / arr.length;
   };
 
-  var avgPeak = function(arr: BacktestEpisode[]) {
-    if (arr.length === 0) return 0;
-    return arr.reduce(function(s, e) { return s + e.peakAPR; }, 0) / arr.length;
-  };
-
-  var avgNetRet = function(arr: BacktestEpisode[]) {
-    var withData = arr.filter(function(e) { return e.netReturn7d !== null; });
+  var avgNullable = function(arr: BacktestEpisode[], fn: (e: BacktestEpisode) => number | null) {
+    var withData = arr.filter(function(e) { return fn(e) !== null; });
     if (withData.length === 0) return 0;
-    return withData.reduce(function(s, e) { return s + e.netReturn7d!; }, 0) / withData.length;
-  };
-
-  var avgPricePnl = function(arr: BacktestEpisode[]) {
-    var withData = arr.filter(function(e) { return e.pricePnlPct !== null; });
-    if (withData.length === 0) return 0;
-    return withData.reduce(function(s, e) { return s + e.pricePnlPct!; }, 0) / withData.length;
+    return withData.reduce(function(s, e) { return s + fn(e)!; }, 0) / withData.length;
   };
 
   var rows = [
-    { label: "Long-Pays (SHORT to earn)", count: longPays.length, avgPeak: avgPeak(longPays), avgEarn: avgEarn(longPays), avgPrice: avgPricePnl(longPays), avgNet: avgNetRet(longPays), color: C.r },
-    { label: "Short-Pays (LONG to earn)", count: shortPays.length, avgPeak: avgPeak(shortPays), avgEarn: avgEarn(shortPays), avgPrice: avgPricePnl(shortPays), avgNet: avgNetRet(shortPays), color: C.g },
+    {
+      label: "Long-Pays (SHORT to earn)", count: longPays.length, color: C.r,
+      avgPeak: avgVal(longPays, function(e) { return e.peakAPR; }),
+      avgHold: avgVal(longPays, function(e) { return e.holdHours; }),
+      avgFunding: avgVal(longPays, function(e) { return e.cumulativeFundingHold; }),
+      avgPrice: avgNullable(longPays, function(e) { return e.pricePnlPct; }),
+      avgNet: avgNullable(longPays, function(e) { return e.netReturn; }),
+    },
+    {
+      label: "Short-Pays (LONG to earn)", count: shortPays.length, color: C.g,
+      avgPeak: avgVal(shortPays, function(e) { return e.peakAPR; }),
+      avgHold: avgVal(shortPays, function(e) { return e.holdHours; }),
+      avgFunding: avgVal(shortPays, function(e) { return e.cumulativeFundingHold; }),
+      avgPrice: avgNullable(shortPays, function(e) { return e.pricePnlPct; }),
+      avgNet: avgNullable(shortPays, function(e) { return e.netReturn; }),
+    },
   ];
 
   return (
@@ -281,9 +283,10 @@ function DirectionBreakdown(props: { episodes: BacktestEpisode[] }) {
               <div style={{ fontSize: 11, color: C.txM, lineHeight: 1.8 }}>
                 <div>Episodes: <span style={{ color: C.tx, fontWeight: 600 }}>{r.count}</span></div>
                 <div>Avg Peak: <span style={{ color: C.o, fontWeight: 600 }}>{fmtAPR(r.avgPeak)}</span></div>
-                <div>Avg 7d Funding: <span style={{ color: C.g, fontWeight: 600 }}>{(r.avgEarn * 100).toFixed(4)}%</span></div>
-                <div>Avg Price P&L: <span style={{ color: r.avgPrice >= 0 ? C.g : C.r, fontWeight: 600 }}>{(r.avgPrice * 100).toFixed(4)}%</span></div>
-                <div>Avg Net Return: <span style={{ color: r.avgNet >= 0 ? C.g : C.r, fontWeight: 700 }}>{(r.avgNet * 100).toFixed(4)}%</span></div>
+                <div>Avg Hold: <span style={{ color: C.txM, fontWeight: 600 }}>{r.avgHold.toFixed(1)}h</span></div>
+                <div>Hold Funding: <span style={{ color: C.g, fontWeight: 600 }}>{(r.avgFunding * 100).toFixed(4)}%</span></div>
+                <div>Price P&L: <span style={{ color: r.avgPrice >= 0 ? C.g : C.r, fontWeight: 600 }}>{(r.avgPrice * 100).toFixed(4)}%</span></div>
+                <div>Net Return: <span style={{ color: r.avgNet >= 0 ? C.g : C.r, fontWeight: 700 }}>{(r.avgNet * 100).toFixed(4)}%</span></div>
               </div>
             </div>
           );
@@ -306,14 +309,14 @@ function EpisodeTable(props: { episodes: BacktestEpisode[] }) {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
           <thead>
             <tr style={{ borderBottom: "1px solid " + C.b }}>
-              {["Token", "Date", "Dir", "Peak APR", "Duration", "Reverted", "7d Fund", "Entry $", "7d $", "Price P&L", "Net Return"].map(function(h) {
+              {["Token", "Date", "Dir", "Peak APR", "Hold", "Reverted", "Funding", "Entry $", "Exit $", "Price P&L", "Net Return"].map(function(h) {
                 return <th key={h} style={{ padding: "5px 6px", textAlign: "left", color: C.txD, fontWeight: 600, fontSize: 8, textTransform: "uppercase" }}>{h}</th>;
               })}
             </tr>
           </thead>
           <tbody>
             {sorted.map(function(ep, i) {
-              var netColor = ep.netReturn7d !== null ? (ep.netReturn7d >= 0 ? C.g : C.r) : C.txD;
+              var netColor = ep.netReturn !== null ? (ep.netReturn >= 0 ? C.g : C.r) : C.txD;
               var priceColor = ep.pricePnlPct !== null ? (ep.pricePnlPct >= 0 ? C.g : C.r) : C.txD;
               return (
                 <tr key={i} style={{ borderBottom: "1px solid " + C.b + "40" }}>
@@ -325,13 +328,13 @@ function EpisodeTable(props: { episodes: BacktestEpisode[] }) {
                     </span>
                   </td>
                   <td style={{ padding: "6px 6px", color: C.o, fontWeight: 600 }}>{fmtAPR(ep.peakAPR)}</td>
-                  <td style={{ padding: "6px 6px", color: C.txM }}>{ep.durationHours.toFixed(1)}h</td>
+                  <td style={{ padding: "6px 6px", color: C.txM }}>{ep.holdHours.toFixed(1)}h</td>
                   <td style={{ padding: "6px 6px", color: ep.revertedBelow100 ? C.g : C.r }}>{ep.revertedBelow100 ? "YES" : "NO"}</td>
-                  <td style={{ padding: "6px 6px", color: C.g }}>{(ep.cumulativeFunding7d * 100).toFixed(4)}%</td>
+                  <td style={{ padding: "6px 6px", color: C.g }}>{(ep.cumulativeFundingHold * 100).toFixed(4)}%</td>
                   <td style={{ padding: "6px 6px", color: C.txM }}>{fmtPrice(ep.priceAtEntry)}</td>
-                  <td style={{ padding: "6px 6px", color: C.txM }}>{fmtPrice(ep.priceAfter7d)}</td>
+                  <td style={{ padding: "6px 6px", color: C.txM }}>{fmtPrice(ep.priceAtExit)}</td>
                   <td style={{ padding: "6px 6px", color: priceColor, fontWeight: 600 }}>{fmtPct(ep.pricePnlPct)}</td>
-                  <td style={{ padding: "6px 6px", color: netColor, fontWeight: 700 }}>{fmtPct(ep.netReturn7d)}</td>
+                  <td style={{ padding: "6px 6px", color: netColor, fontWeight: 700 }}>{fmtPct(ep.netReturn)}</td>
                 </tr>
               );
             })}
@@ -358,7 +361,7 @@ export default function BacktestView() {
           <span style={{ color: C.o }}>Funding Rate</span> Backtest
         </h2>
         <div style={{ fontSize: 11, color: C.txM }}>
-          Analyze historical funding rate spikes with price impact to identify profitable trading patterns
+          Analyze historical funding rate spikes with price impact over realistic hold periods
         </div>
       </div>
 
@@ -458,15 +461,16 @@ export default function BacktestView() {
 
           {/* Strategy insight */}
           {bt.data.totalEpisodes > 0 && (
-            <div style={{ background: (bt.data.avgNetReturn7d >= 0 ? C.g : C.r) + "08", border: "1px solid " + (bt.data.avgNetReturn7d >= 0 ? C.g : C.r) + "25", borderRadius: 10, padding: 16, marginTop: 14 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: bt.data.avgNetReturn7d >= 0 ? C.g : C.r, marginBottom: 6 }}>{"\uD83D\uDCA1"} Strategy Insight</div>
+            <div style={{ background: (bt.data.avgNetReturn >= 0 ? C.g : C.r) + "08", border: "1px solid " + (bt.data.avgNetReturn >= 0 ? C.g : C.r) + "25", borderRadius: 10, padding: 16, marginTop: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: bt.data.avgNetReturn >= 0 ? C.g : C.r, marginBottom: 6 }}>{"\uD83D\uDCA1"} Strategy Insight</div>
               <div style={{ fontSize: 11, color: C.txM, lineHeight: 1.7 }}>
-                {bt.data.avgNetReturn7d >= 0 ? (
+                {bt.data.avgNetReturn >= 0 ? (
                   <span>
-                    Average 7-day <strong style={{ color: C.g }}>net return</strong> (funding + price impact) is{" "}
-                    <strong style={{ color: C.g }}>{(bt.data.avgNetReturn7d * 100).toFixed(4)}%</strong> per $1 notional.
-                    {" "}Funding earned <strong style={{ color: C.g }}>{(bt.data.avgEarnings7d * 100).toFixed(4)}%</strong>,
-                    price impact averaged <strong style={{ color: bt.data.avgPricePnl7d >= 0 ? C.g : C.r }}>{(bt.data.avgPricePnl7d * 100).toFixed(4)}%</strong>.
+                    Average <strong style={{ color: C.g }}>net return</strong> (funding + price) over a{" "}
+                    <strong style={{ color: C.o }}>{bt.data.avgHoldHours.toFixed(1)}h</strong> avg hold is{" "}
+                    <strong style={{ color: C.g }}>{(bt.data.avgNetReturn * 100).toFixed(4)}%</strong> per $1 notional.
+                    {" "}Funding earned <strong style={{ color: C.g }}>{(bt.data.avgFundingHold * 100).toFixed(4)}%</strong>,
+                    price impact averaged <strong style={{ color: bt.data.avgPricePnl >= 0 ? C.g : C.r }}>{(bt.data.avgPricePnl * 100).toFixed(4)}%</strong>.
                     {bt.data.revertPct > 60 && (
                       <span>
                         {" "}<strong style={{ color: C.g }}>{bt.data.revertPct.toFixed(0)}%</strong> of episodes reverted below 100% APR
@@ -477,10 +481,11 @@ export default function BacktestView() {
                   </span>
                 ) : (
                   <span>
-                    Average 7-day <strong style={{ color: C.r }}>net return is negative</strong> at{" "}
-                    <strong style={{ color: C.r }}>{(bt.data.avgNetReturn7d * 100).toFixed(4)}%</strong>.
-                    {" "}While funding earned <strong style={{ color: C.g }}>{(bt.data.avgEarnings7d * 100).toFixed(4)}%</strong>,
-                    price impact of <strong style={{ color: C.r }}>{(bt.data.avgPricePnl7d * 100).toFixed(4)}%</strong> wiped out gains.
+                    Average <strong style={{ color: C.r }}>net return is negative</strong> at{" "}
+                    <strong style={{ color: C.r }}>{(bt.data.avgNetReturn * 100).toFixed(4)}%</strong> over a{" "}
+                    <strong style={{ color: C.o }}>{bt.data.avgHoldHours.toFixed(1)}h</strong> avg hold.
+                    {" "}While funding earned <strong style={{ color: C.g }}>{(bt.data.avgFundingHold * 100).toFixed(4)}%</strong>,
+                    price impact of <strong style={{ color: C.r }}>{(bt.data.avgPricePnl * 100).toFixed(4)}%</strong> wiped out gains.
                     {" "}Consider <strong style={{ color: C.o }}>delta-neutral hedging</strong> (spot + perp) or tighter stop-losses to protect against adverse price moves.
                   </span>
                 )}

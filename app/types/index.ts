@@ -178,10 +178,12 @@ export interface BacktestEpisode {
   revertedBelow100: boolean;
   revertHours: number | null;
   cumulativeFunding7d: number;
+  holdHours: number;
+  cumulativeFundingHold: number;
   priceAtEntry: number | null;
-  priceAfter7d: number | null;
+  priceAtExit: number | null;
   pricePnlPct: number | null;
-  netReturn7d: number | null;
+  netReturn: number | null;
 }
 
 export interface BacktestTokenSummary {
@@ -191,8 +193,10 @@ export interface BacktestTokenSummary {
   avgDuration: number;
   revertPct: number;
   avgEarnings7d: number;
-  avgPricePnl7d: number;
-  avgNetReturn7d: number;
+  avgHoldHours: number;
+  avgFundingHold: number;
+  avgPricePnl: number;
+  avgNetReturn: number;
 }
 
 export interface BacktestResult {
@@ -206,9 +210,11 @@ export interface BacktestResult {
   revertPct: number;
   avgEarnings7d: number;
   medianEarnings7d: number;
-  avgPricePnl7d: number;
-  avgNetReturn7d: number;
-  medianNetReturn7d: number;
+  avgHoldHours: number;
+  avgFundingHold: number;
+  avgPricePnl: number;
+  avgNetReturn: number;
+  medianNetReturn: number;
 }
 
 // ── Bot / Trade types ──
