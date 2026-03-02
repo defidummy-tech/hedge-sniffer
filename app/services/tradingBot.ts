@@ -58,6 +58,28 @@ async function getSDK(config: BotConfig): Promise<Hyperliquid> {
   return sdk;
 }
 
+// ── Mainnet SDK singleton for paper trading reads ──
+var mainnetSdk: Hyperliquid | null = null;
+
+async function getMainnetSDK(): Promise<Hyperliquid> {
+  if (!mainnetSdk) {
+    var key = getPrivateKey();
+    if (!key) throw new Error("No private key for mainnet SDK init");
+    mainnetSdk = new Hyperliquid({
+      privateKey: key,
+      testnet: false, // always mainnet for paper mode reads
+      enableWs: false,
+    });
+    await mainnetSdk.connect();
+  }
+  return mainnetSdk;
+}
+
+async function getReadSDK(config: BotConfig): Promise<Hyperliquid> {
+  if (config.paperTrading) return getMainnetSDK();
+  return getSDK(config);
+}
+
 // ── Generate unique trade ID ──
 function genId(): string {
   return "t_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
@@ -82,6 +104,11 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
   var config = await journal.getConfig();
   var closed: string[] = [];
   var errors: string[] = [];
+
+  // Paper mode: close simulated positions only
+  if (config.paperTrading) {
+    return closeAllPaperPositions();
+  }
 
   if (!getPrivateKey()) {
     errors.push("No private key");
@@ -143,6 +170,39 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
   } catch (e: any) {
     errors.push("SDK error: " + e.message);
     journal.logAction("ERROR", "Kill switch SDK: " + e.message);
+  }
+
+  return { closed: closed, errors: errors };
+}
+
+// ── Close all paper positions (simulated kill switch) ──
+async function closeAllPaperPositions(): Promise<{ closed: string[]; errors: string[] }> {
+  var closed: string[] = [];
+  var errors: string[] = [];
+
+  try {
+    var hl = await getMainnetSDK();
+    var mids = await hl.info.getAllMids();
+    var openTrades = await journal.getOpenTrades(true); // paper only
+
+    for (var trade of openTrades) {
+      try {
+        var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
+        var notional = trade.sizeUSD * trade.leverage;
+        var priceChange = (midPrice - trade.entryPrice) / trade.entryPrice;
+        var unrealizedPnl = trade.direction === "long"
+          ? notional * priceChange
+          : notional * (-priceChange);
+
+        await journal.closeTrade(trade.id, midPrice, 0, "kill_switch", unrealizedPnl, trade.fundingEarned);
+        closed.push(trade.coin);
+        journal.logAction("KILL", "[PAPER] Closed " + trade.coin);
+      } catch (e: any) {
+        errors.push(trade.coin + ": " + e.message);
+      }
+    }
+  } catch (e: any) {
+    errors.push("Paper kill: " + e.message);
   }
 
   return { closed: closed, errors: errors };
@@ -223,18 +283,29 @@ export async function botTick(): Promise<{
 
   var hl: Hyperliquid;
   try {
-    hl = await getSDK(config);
+    hl = await getReadSDK(config);
   } catch (e: any) {
     journal.logAction("ERROR", "SDK init: " + e.message);
     result.errors.push("SDK init: " + e.message);
     return result;
   }
 
-  // ── Step 0: Recover orphaned positions (journal lost but HL has positions) ──
-  try {
-    await recoverOrphanedPositions(hl, config);
-  } catch (e: any) {
-    journal.logAction("ERROR", "Position recovery: " + e.message);
+  // ── Step 0: Recover orphaned positions (skip in paper mode — no real positions) ──
+  if (!config.paperTrading) {
+    try {
+      await recoverOrphanedPositions(hl, config);
+    } catch (e: any) {
+      journal.logAction("ERROR", "Position recovery: " + e.message);
+    }
+  }
+
+  // ── Step 0.5 (paper mode): Accrue funding on open paper trades ──
+  if (config.paperTrading) {
+    try {
+      await accruePaperFunding(hl);
+    } catch (e: any) {
+      journal.logAction("ERROR", "Paper funding accrual: " + e.message);
+    }
   }
 
   // ── Step 1: Check existing positions & close if needed ──
@@ -256,12 +327,134 @@ export async function botTick(): Promise<{
   return result;
 }
 
+// ── Accrue funding on paper trades using real mainnet rates ──
+async function accruePaperFunding(hl: Hyperliquid): Promise<void> {
+  var openTrades = await journal.getOpenTrades(true); // paper only
+  if (openTrades.length === 0) return;
+
+  var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+  var meta = metaCtx[0];
+  var assetCtxs = metaCtx[1];
+
+  // Build hourly funding rate map
+  var fundingMap: Record<string, number> = {};
+  meta.universe.forEach(function(u: any, i: number) {
+    var ctx = assetCtxs[i];
+    if (ctx && ctx.funding) {
+      fundingMap[u.name] = parseFloat(ctx.funding); // hourly rate
+    }
+  });
+
+  var now = Date.now();
+
+  for (var trade of openTrades) {
+    var hourlyRate = fundingMap[trade.coin] || 0;
+    if (hourlyRate === 0) continue;
+
+    var lastCheck = trade.lastFundingCheck || trade.entryTime;
+    var deltaHours = (now - lastCheck) / 3600000;
+    if (deltaHours < 0.1) continue; // skip if checked very recently
+
+    // Funding earned: positive hourlyRate = longs pay shorts
+    // If we're SHORT and rate > 0, we earn. If LONG and rate < 0, we earn.
+    var notional = trade.sizeUSD * trade.leverage;
+    var rawFunding = hourlyRate * notional * deltaHours;
+    var fundingDelta = trade.direction === "short" ? rawFunding : -rawFunding;
+
+    await journal.updateTradeFunding(trade.id, fundingDelta, now);
+
+    if (Math.abs(fundingDelta) > 0.001) {
+      journal.logAction("FUND", "[PAPER] " + trade.coin + " funding: $" + fundingDelta.toFixed(4) +
+        " (" + deltaHours.toFixed(1) + "h, rate=" + (hourlyRate * 100).toFixed(4) + "%/h)");
+    }
+  }
+}
+
+// ── Check paper positions for exit conditions (uses journal + mainnet prices) ──
+async function checkPaperPositions(
+  hl: Hyperliquid,
+  config: BotConfig,
+  result: { closed: string[]; errors: string[] }
+): Promise<void> {
+  var openTrades = await journal.getOpenTrades(true); // paper only
+  if (openTrades.length === 0) return;
+
+  var mids = await hl.info.getAllMids();
+  var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+  var meta = metaCtx[0];
+  var assetCtxs = metaCtx[1];
+
+  var fundingMap: Record<string, number> = {};
+  meta.universe.forEach(function(u: any, i: number) {
+    var ctx = assetCtxs[i];
+    if (ctx && ctx.funding) {
+      fundingMap[u.name] = parseFloat(ctx.funding) * 8760; // APR
+    }
+  });
+
+  for (var trade of openTrades) {
+    try {
+      var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
+      var currentAPR = Math.abs(fundingMap[trade.coin] || 0);
+      var holdHours = (Date.now() - trade.entryTime) / 3600000;
+
+      // Calculate unrealized PnL from price movement
+      var notional = trade.sizeUSD * trade.leverage;
+      var priceChange = (midPrice - trade.entryPrice) / trade.entryPrice;
+      var unrealizedPnl = trade.direction === "long"
+        ? notional * priceChange
+        : notional * (-priceChange);
+
+      // Update live PnL in journal
+      await journal.updateTradePnl(trade.id, unrealizedPnl);
+
+      // Check exit conditions
+      var exitReason: string | null = null;
+      var rawAPR = fundingMap[trade.coin] || 0;
+      var fundingFavorsUs = (trade.direction === "short" && rawAPR > 0) ||
+                            (trade.direction === "long" && rawAPR < 0);
+
+      // Simulated stop-loss: check mid price vs stop level
+      if (trade.stopPrice != null) {
+        var stopHit = trade.direction === "short"
+          ? midPrice >= trade.stopPrice
+          : midPrice <= trade.stopPrice;
+        if (stopHit) exitReason = "stop_loss";
+      }
+
+      // Fallback: PnL-based stop-loss
+      var lossPct = Math.abs(unrealizedPnl) / trade.sizeUSD * 100;
+      if (!exitReason && unrealizedPnl < 0 && lossPct > config.stopLossPct) {
+        exitReason = "stop_loss";
+      }
+
+      if (!exitReason && holdHours > config.maxHoldHours) exitReason = "max_hold";
+      if (!exitReason && !fundingFavorsUs) exitReason = "funding_flipped";
+      if (!exitReason && currentAPR < config.exitAPR) exitReason = "funding_reverted";
+
+      if (exitReason) {
+        await journal.closeTrade(trade.id, midPrice, fundingMap[trade.coin] || 0, exitReason, unrealizedPnl, trade.fundingEarned);
+        result.closed.push(trade.coin + ":" + exitReason + " (paper)");
+        journal.logAction("CLOSE", "[PAPER] " + trade.coin + " " + exitReason +
+          " PnL: $" + unrealizedPnl.toFixed(2) + " Funding: $" + trade.fundingEarned.toFixed(4));
+      }
+    } catch (e: any) {
+      result.errors.push("Paper check " + trade.coin + ": " + e.message);
+    }
+  }
+}
+
 // ── Check existing positions for exit conditions ──
 async function checkExistingPositions(
   hl: Hyperliquid,
   config: BotConfig,
   result: { closed: string[]; errors: string[] }
 ): Promise<void> {
+  // Paper mode: use journal + mainnet prices instead of getClearinghouseState
+  if (config.paperTrading) {
+    return checkPaperPositions(hl, config, result);
+  }
+
   var openTrades = await journal.getOpenTrades();
   if (openTrades.length === 0) return;
 
@@ -369,7 +562,8 @@ async function scanForOpportunities(
   config: BotConfig,
   result: { scanned: number; opened: string[]; skipped: string[]; errors: string[] }
 ): Promise<void> {
-  var openCount = (await journal.getOpenTrades()).length;
+  var isPaper = config.paperTrading;
+  var openCount = (await journal.getOpenTrades(isPaper ? true : undefined)).length;
   if (openCount >= config.maxPositions) {
     journal.logAction("SCAN", "Max positions reached (" + openCount + "/" + config.maxPositions + ")");
     return;
@@ -422,8 +616,8 @@ async function scanForOpportunities(
   for (var opp of opportunities) {
     if (openCount >= config.maxPositions) break;
 
-    // Skip if already have position
-    if (await journal.isAlreadyOpen(opp.coin)) {
+    // Skip if already have position (filter by current mode)
+    if (await journal.isAlreadyOpen(opp.coin, isPaper ? true : undefined)) {
       result.skipped.push(opp.coin + ":already_open");
       continue;
     }
@@ -439,117 +633,161 @@ async function scanForOpportunities(
       continue;
     }
 
-    try {
-      // Set leverage
-      await hl.exchange.updateLeverage(opp.coin, "cross", lev);
-
-      // Place market order
-      var isBuy = opp.direction === "long";
-      var orderResult = await hl.custom.marketOpen(opp.coin, isBuy, size);
-
-      // Determine fill price
-      var fillPrice = opp.midPrice;
-      if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
-        var statuses = orderResult.response.data.statuses;
-        if (statuses[0] && statuses[0].filled) {
-          fillPrice = parseFloat(statuses[0].filled.avgPx);
-        }
-      }
-
-      // Record trade
-      var trade: BotTrade = {
-        id: genId(),
-        coin: opp.coin,
-        direction: opp.direction,
-        sizeUSD: config.maxPositionUSD,
-        leverage: lev,
-        entryPrice: fillPrice,
-        entryTime: Date.now(),
-        entryFundingAPR: opp.fundingAPR,
-        exitPrice: null,
-        exitTime: null,
-        exitFundingAPR: null,
-        exitReason: null,
-        pnl: 0,
-        fundingEarned: 0,
-        totalReturn: 0,
-        status: "open",
-        spotHedge: false,
-        spotEntryPrice: null,
-        spotExitPrice: null,
-      };
-
-      await journal.addTrade(trade);
-
-      // Place stop-loss order directly on Hyperliquid for instant execution
+    if (isPaper) {
+      // ── Paper mode: simulate fill at mid price ──
       try {
+        var fillPrice = opp.midPrice;
         var priceMoveThreshold = config.stopLossPct / (lev * 100);
-        var stopPrice: number;
-        var slBuy: boolean;
+        var simStopPrice = opp.direction === "short"
+          ? roundSigFigs(fillPrice * (1 + priceMoveThreshold), 5)
+          : roundSigFigs(fillPrice * (1 - priceMoveThreshold), 5);
 
-        if (opp.direction === "short") {
-          // SHORT position: stop-loss triggers when price RISES
-          stopPrice = fillPrice * (1 + priceMoveThreshold);
-          slBuy = true; // buy to close short
-        } else {
-          // LONG position: stop-loss triggers when price DROPS
-          stopPrice = fillPrice * (1 - priceMoveThreshold);
-          slBuy = false; // sell to close long
-        }
+        var paperTrade: BotTrade = {
+          id: genId(),
+          coin: opp.coin,
+          direction: opp.direction,
+          sizeUSD: config.maxPositionUSD,
+          leverage: lev,
+          entryPrice: fillPrice,
+          entryTime: Date.now(),
+          entryFundingAPR: opp.fundingAPR,
+          exitPrice: null,
+          exitTime: null,
+          exitFundingAPR: null,
+          exitReason: null,
+          pnl: 0,
+          fundingEarned: 0,
+          totalReturn: 0,
+          status: "open",
+          spotHedge: false,
+          spotEntryPrice: null,
+          spotExitPrice: null,
+          paper: true,
+          lastFundingCheck: Date.now(),
+          stopPrice: simStopPrice,
+        };
 
-        // Round prices to 5 significant figures (Hyperliquid requirement)
-        // Without rounding, .toString() produces 17+ decimal places which the exchange rejects
-        stopPrice = roundSigFigs(stopPrice, 5);
-        var slLimitPx = roundSigFigs(slBuy ? stopPrice * 1.10 : stopPrice * 0.90, 5);
-
-        // Use actual fill size from market order (may differ from calculated size due to rounding)
-        var slSize = size;
-        if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
-          var fillStatus = orderResult.response.data.statuses[0];
-          if (fillStatus && fillStatus.filled) {
-            slSize = parseFloat(fillStatus.filled.totalSz);
-          }
-        }
-
-        var slResponse = await hl.exchange.placeOrder({
-          coin: toPerpCoin(opp.coin),
-          is_buy: slBuy,
-          sz: slSize,
-          limit_px: slLimitPx,
-          order_type: { trigger: { triggerPx: stopPrice, isMarket: true, tpsl: "sl" } },
-          reduce_only: true,
-          grouping: "normalTpsl",
-        });
-
-        // Check response for acceptance — HL returns statuses with resting/filled/error
-        var slAccepted = false;
-        if (slResponse && slResponse.response && slResponse.response.data && slResponse.response.data.statuses) {
-          var slStatus = slResponse.response.data.statuses[0];
-          if (slStatus && slStatus.resting) {
-            slAccepted = true;
-          } else if (slStatus && slStatus.filled) {
-            slAccepted = true; // shouldn't happen for trigger but handle it
-          } else if (slStatus && slStatus.error) {
-            throw new Error(slStatus.error);
-          }
-        }
-
-        if (slAccepted) {
-          journal.logAction("SL", opp.coin + " stop-loss set at $" + stopPrice.toFixed(4) + " (" + config.stopLossPct + "% loss)");
-        } else {
-          journal.logAction("WARN", "Stop-loss response unclear for " + opp.coin + ": " + JSON.stringify(slResponse).slice(0, 200));
-        }
-      } catch (slErr: any) {
-        // Don't fail the whole trade — SL is best-effort; cron tick also checks
-        journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
+        await journal.addTrade(paperTrade);
+        journal.logAction("OPEN", "[PAPER] " + opp.coin + " " + opp.direction.toUpperCase() +
+          " $" + config.maxPositionUSD + " @ $" + fillPrice.toFixed(2) +
+          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + simStopPrice.toFixed(4) + ")");
+        result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2) + " (paper)");
+        openCount++;
+      } catch (e: any) {
+        journal.logAction("ERROR", "[PAPER] Open " + opp.coin + ": " + e.message);
+        result.errors.push("Paper open " + opp.coin + ": " + e.message);
       }
 
-      result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2));
-      openCount++;
+    } else {
+      // ── Real mode: place actual orders on exchange ──
+      try {
+        // Set leverage
+        await hl.exchange.updateLeverage(opp.coin, "cross", lev);
 
-    } catch (e: any) {
-      journal.logAction("ERROR", "Open " + opp.coin + ": " + e.message);
-      result.errors.push("Open " + opp.coin + ": " + e.message);
+        // Place market order
+        var isBuy = opp.direction === "long";
+        var orderResult = await hl.custom.marketOpen(opp.coin, isBuy, size);
+
+        // Determine fill price
+        var fillPrice = opp.midPrice;
+        if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
+          var statuses = orderResult.response.data.statuses;
+          if (statuses[0] && statuses[0].filled) {
+            fillPrice = parseFloat(statuses[0].filled.avgPx);
+          }
+        }
+
+        // Record trade
+        var trade: BotTrade = {
+          id: genId(),
+          coin: opp.coin,
+          direction: opp.direction,
+          sizeUSD: config.maxPositionUSD,
+          leverage: lev,
+          entryPrice: fillPrice,
+          entryTime: Date.now(),
+          entryFundingAPR: opp.fundingAPR,
+          exitPrice: null,
+          exitTime: null,
+          exitFundingAPR: null,
+          exitReason: null,
+          pnl: 0,
+          fundingEarned: 0,
+          totalReturn: 0,
+          status: "open",
+          spotHedge: false,
+          spotEntryPrice: null,
+          spotExitPrice: null,
+          paper: false,
+          lastFundingCheck: Date.now(),
+          stopPrice: null,
+        };
+
+        await journal.addTrade(trade);
+
+        // Place stop-loss order directly on Hyperliquid for instant execution
+        try {
+          var priceMoveThreshold = config.stopLossPct / (lev * 100);
+          var stopPrice: number;
+          var slBuy: boolean;
+
+          if (opp.direction === "short") {
+            stopPrice = fillPrice * (1 + priceMoveThreshold);
+            slBuy = true;
+          } else {
+            stopPrice = fillPrice * (1 - priceMoveThreshold);
+            slBuy = false;
+          }
+
+          stopPrice = roundSigFigs(stopPrice, 5);
+          var slLimitPx = roundSigFigs(slBuy ? stopPrice * 1.10 : stopPrice * 0.90, 5);
+
+          var slSize = size;
+          if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
+            var fillStatus = orderResult.response.data.statuses[0];
+            if (fillStatus && fillStatus.filled) {
+              slSize = parseFloat(fillStatus.filled.totalSz);
+            }
+          }
+
+          var slResponse = await hl.exchange.placeOrder({
+            coin: toPerpCoin(opp.coin),
+            is_buy: slBuy,
+            sz: slSize,
+            limit_px: slLimitPx,
+            order_type: { trigger: { triggerPx: stopPrice, isMarket: true, tpsl: "sl" } },
+            reduce_only: true,
+            grouping: "normalTpsl",
+          });
+
+          var slAccepted = false;
+          if (slResponse && slResponse.response && slResponse.response.data && slResponse.response.data.statuses) {
+            var slStatus = slResponse.response.data.statuses[0];
+            if (slStatus && slStatus.resting) {
+              slAccepted = true;
+            } else if (slStatus && slStatus.filled) {
+              slAccepted = true;
+            } else if (slStatus && slStatus.error) {
+              throw new Error(slStatus.error);
+            }
+          }
+
+          if (slAccepted) {
+            journal.logAction("SL", opp.coin + " stop-loss set at $" + stopPrice.toFixed(4) + " (" + config.stopLossPct + "% loss)");
+          } else {
+            journal.logAction("WARN", "Stop-loss response unclear for " + opp.coin + ": " + JSON.stringify(slResponse).slice(0, 200));
+          }
+        } catch (slErr: any) {
+          journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
+        }
+
+        result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2));
+        openCount++;
+
+      } catch (e: any) {
+        journal.logAction("ERROR", "Open " + opp.coin + ": " + e.message);
+        result.errors.push("Open " + opp.coin + ": " + e.message);
+      }
     }
   }
 }
@@ -564,6 +802,12 @@ export async function getAccountStatus(): Promise<{
   debug: Record<string, any>;
 }> {
   var config = await journal.getConfig();
+
+  // Paper mode: return simulated account from journal data
+  if (config.paperTrading) {
+    return getPaperAccountStatus(config);
+  }
+
   var walletAddr = "";
   var debug: Record<string, any> = { testnetConfig: config.testnet };
 
@@ -638,9 +882,50 @@ export async function getAccountStatus(): Promise<{
   }
 }
 
+// ── Paper mode account status (simulated balance from journal) ──
+async function getPaperAccountStatus(config: BotConfig): Promise<{
+  balance: number;
+  marginUsed: number;
+  positions: Array<{ coin: string; size: string; entryPx: string; unrealizedPnl: string; leverage: number }>;
+  walletAddress: string;
+  error: string;
+  debug: Record<string, any>;
+}> {
+  var openTrades = await journal.getOpenTrades(true);
+  var allTrades = await journal.getAllTrades();
+  var closedPaper = allTrades.filter(function(t) { return t.paper && t.status !== "open"; });
+  var realizedPnl = closedPaper.reduce(function(s, t) { return s + t.totalReturn; }, 0);
+  var unrealizedPnl = openTrades.reduce(function(s, t) { return s + t.pnl + t.fundingEarned; }, 0);
+  var marginUsed = openTrades.reduce(function(s, t) { return s + t.sizeUSD; }, 0);
+  var balance = config.paperBalance + realizedPnl + unrealizedPnl;
+
+  return {
+    balance: balance,
+    marginUsed: marginUsed,
+    positions: openTrades.map(function(t) {
+      return {
+        coin: t.coin,
+        size: ((t.sizeUSD * t.leverage) / t.entryPrice).toFixed(6),
+        entryPx: t.entryPrice.toFixed(2),
+        unrealizedPnl: t.pnl.toFixed(2),
+        leverage: t.leverage,
+      };
+    }),
+    walletAddress: "PAPER_TRADING",
+    error: "",
+    debug: { mode: "paper", startingBalance: config.paperBalance, realizedPnl: realizedPnl },
+  };
+}
+
 // ── Get live position P&L details (for kill switch) ──
 export async function getPositionDetails(): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
   var config = await journal.getConfig();
+
+  // Paper mode: calculate from journal trades + mainnet prices
+  if (config.paperTrading) {
+    return getPaperPositionDetails();
+  }
+
   var result: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> = {};
 
   try {
@@ -668,13 +953,43 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
   return result;
 }
 
+// ── Paper mode position details ──
+async function getPaperPositionDetails(): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
+  var result: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> = {};
+
+  try {
+    var hl = await getMainnetSDK();
+    var mids = await hl.info.getAllMids();
+    var openTrades = await journal.getOpenTrades(true);
+
+    for (var trade of openTrades) {
+      var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
+      var notional = trade.sizeUSD * trade.leverage;
+      var priceChange = (midPrice - trade.entryPrice) / trade.entryPrice;
+      var unrealizedPnl = trade.direction === "long"
+        ? notional * priceChange
+        : notional * (-priceChange);
+
+      result[trade.coin] = {
+        unrealizedPnl: unrealizedPnl,
+        cumFunding: trade.fundingEarned,
+        midPrice: midPrice,
+      };
+    }
+  } catch (e: any) {
+    journal.logAction("ERROR", "getPaperPositionDetails: " + e.message);
+  }
+
+  return result;
+}
+
 // ── Get current funding rates for all perps ──
 export async function getFundingRates(): Promise<Record<string, number>> {
   var config = await journal.getConfig();
   var rates: Record<string, number> = {};
 
   try {
-    var hl = await getSDK(config);
+    var hl = await getReadSDK(config);
     var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
     var meta = metaCtx[0];
     var assetCtxs = metaCtx[1];

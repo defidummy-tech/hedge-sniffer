@@ -31,7 +31,8 @@ export async function POST(req: NextRequest) {
     errors = result.errors;
 
     // 4. Mark all journal trades as closed with actual P&L
-    var openTrades = await journal.getOpenTrades();
+    var config2 = await journal.getConfig();
+    var openTrades = await journal.getOpenTrades(config2.paperTrading ? true : undefined);
     for (var trade of openTrades) {
       var details = pnlDetails[trade.coin];
       if (details) {

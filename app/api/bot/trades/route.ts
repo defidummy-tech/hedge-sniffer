@@ -2,15 +2,29 @@
 // Returns all trades (open and closed) for the performance dashboard.
 // Open trades are enriched with live P&L data from Hyperliquid.
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import * as journal from "../../../services/tradeJournal";
 import { getPositionDetails } from "../../../services/tradingBot";
 
 export var dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    var config = await journal.getConfig();
     var trades = await journal.getAllTrades();
+
+    // Filter by paper mode: ?paper=true or ?paper=false, or auto based on current mode
+    var url = new URL(req.url);
+    var paperParam = url.searchParams.get("paper");
+    if (paperParam === "true") {
+      trades = trades.filter(function(t) { return t.paper === true; });
+    } else if (paperParam === "false") {
+      trades = trades.filter(function(t) { return !t.paper; });
+    } else if (config.paperTrading) {
+      trades = trades.filter(function(t) { return t.paper === true; });
+    } else {
+      trades = trades.filter(function(t) { return !t.paper; });
+    }
 
     // Enrich open trades with live P&L from Hyperliquid
     var openTrades = trades.filter(function(t) { return t.status === "open"; });

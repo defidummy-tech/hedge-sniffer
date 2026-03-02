@@ -205,7 +205,12 @@ function TradeHistory(props: { trades: BotTrade[] }) {
               var totalColor = t.totalReturn >= 0 ? C.g : C.r;
               return (
                 <tr key={t.id} style={{ borderBottom: "1px solid " + C.b + "40" }}>
-                  <td style={{ padding: "6px 6px", color: C.a, fontWeight: 700 }}>{t.coin}</td>
+                  <td style={{ padding: "6px 6px", color: C.a, fontWeight: 700 }}>
+                    {t.coin}
+                    {t.paper && (
+                      <span style={{ marginLeft: 4, fontSize: 7, padding: "1px 3px", borderRadius: 3, background: C.y + "20", color: C.y, fontWeight: 700 }}>P</span>
+                    )}
+                  </td>
                   <td style={{ padding: "6px 6px" }}>
                     <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, fontWeight: 700, background: (t.direction === "long" ? C.g : C.r) + "18", color: t.direction === "long" ? C.g : C.r }}>
                       {t.direction.toUpperCase()}
@@ -243,11 +248,13 @@ export default function PerformanceView() {
   var [trades, setTrades] = useState<BotTrade[]>([]);
   var [loading, setLoading] = useState(false);
   var [error, setError] = useState<string | null>(null);
+  var [tradeFilter, setTradeFilter] = useState<string>("auto"); // "auto", "paper", "live"
 
   var fetchTrades = useCallback(async function() {
     setLoading(true);
     try {
-      var res = await fetch("/api/bot/trades");
+      var param = tradeFilter === "paper" ? "?paper=true" : tradeFilter === "live" ? "?paper=false" : "";
+      var res = await fetch("/api/bot/trades" + param);
       if (!res.ok) throw new Error("Trades API " + res.status);
       var json = await res.json();
       if (json.ok) {
@@ -259,7 +266,7 @@ export default function PerformanceView() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tradeFilter]);
 
   useEffect(function() {
     fetchTrades();
@@ -276,6 +283,33 @@ export default function PerformanceView() {
         </h2>
         <div style={{ fontSize: 11, color: C.txM }}>
           Track P&L, win rates, and funding income across all bot trades
+        </div>
+
+        {/* Paper / Live filter */}
+        <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
+          {[
+            { key: "auto", label: "Current Mode" },
+            { key: "live", label: "Live Trades" },
+            { key: "paper", label: "Paper Trades" },
+          ].map(function(opt) {
+            var active = tradeFilter === opt.key;
+            var col = opt.key === "paper" ? C.y : opt.key === "live" ? C.g : C.a;
+            return (
+              <button
+                key={opt.key}
+                onClick={function() { setTradeFilter(opt.key); }}
+                style={{
+                  padding: "4px 10px", borderRadius: 5, fontSize: 9, fontFamily: "monospace",
+                  fontWeight: 700, cursor: "pointer", letterSpacing: ".03em",
+                  background: active ? col + "20" : "transparent",
+                  border: "1px solid " + (active ? col + "50" : C.b),
+                  color: active ? col : C.txD,
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 

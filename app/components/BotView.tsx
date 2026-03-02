@@ -17,6 +17,8 @@ var DEFAULT_CONFIG: BotConfig = {
   maxHoldHours: 168,
   spotHedge: false,
   spotHedgeRatio: 1.0,
+  paperTrading: false,
+  paperBalance: 10000,
 };
 
 // ── Sub-Components ──
@@ -41,6 +43,16 @@ function StatusBadge(props: { config: BotConfig }) {
       }}>
         {c.testnet ? "\uD83E\uDDEA TESTNET" : "\u26A0 MAINNET"}
       </span>
+      {c.paperTrading && (
+        <span style={{
+          fontSize: 10, padding: "3px 10px", borderRadius: 4, fontWeight: 700, fontFamily: "monospace",
+          background: C.y + "18",
+          color: C.y,
+          border: "1px solid " + C.y + "40",
+        }}>
+          PAPER
+        </span>
+      )}
     </div>
   );
 }
@@ -81,8 +93,11 @@ function PositionRow(props: { trade: BotTrade; fundingAPR?: number }) {
   }
 
   return (
-    <tr style={{ borderBottom: "1px solid " + C.b + "40" }}>
-      <td style={{ padding: "6px 6px", color: C.a, fontWeight: 700 }}>{t.coin}</td>
+    <tr style={{ borderBottom: "1px solid " + C.b + "40", background: t.paper ? C.y + "06" : "transparent" }}>
+      <td style={{ padding: "6px 6px", color: C.a, fontWeight: 700 }}>
+        {t.coin}
+        {t.paper && <span style={{ fontSize: 7, marginLeft: 4, padding: "1px 3px", borderRadius: 2, background: C.y + "20", color: C.y, fontWeight: 700 }}>P</span>}
+      </td>
       <td style={{ padding: "6px 6px" }}>
         <span style={{
           fontSize: 8, padding: "1px 5px", borderRadius: 3, fontWeight: 700,
@@ -176,7 +191,10 @@ export default function BotView() {
   // Kill switch — actually closes positions on Hyperliquid
   var [killing, setKilling] = useState(false);
   var killAll = useCallback(async function() {
-    if (!confirm("CLOSE ALL POSITIONS on Hyperliquid and disable bot?")) return;
+    var killMsg = config.paperTrading
+      ? "Close all PAPER positions and disable bot?"
+      : "CLOSE ALL POSITIONS on Hyperliquid and disable bot?";
+    if (!confirm(killMsg)) return;
     setKilling(true);
     setStatusMsg("Closing all positions...");
     try {
@@ -237,7 +255,7 @@ export default function BotView() {
 
             {status && (
               <div style={{ marginTop: 10, fontSize: 11, color: C.txM, lineHeight: 1.8 }}>
-                <div>Balance: <span style={{ color: C.g, fontWeight: 600 }}>${(status.accountBalance || 0).toFixed(2)}</span></div>
+                <div>{config.paperTrading ? "Paper Balance" : "Balance"}: <span style={{ color: C.g, fontWeight: 600 }}>${(status.accountBalance || 0).toFixed(2)}</span></div>
                 <div>Margin Used: <span style={{ color: C.o, fontWeight: 600 }}>${(status.marginUsed || 0).toFixed(2)}</span></div>
                 <div>Open Positions: <span style={{ color: C.a, fontWeight: 600 }}>{positions.length}</span></div>
               </div>
@@ -305,6 +323,22 @@ export default function BotView() {
                 {config.spotHedge ? "ON" : "OFF"}
               </button>
             </div>
+
+            {/* Paper Trading */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 10, color: C.txM, fontFamily: "monospace" }}>Paper Trading</span>
+              <button
+                onClick={function() { upd("paperTrading", !config.paperTrading); }}
+                style={{
+                  padding: "4px 12px", borderRadius: 5, border: "1px solid " + (config.paperTrading ? C.y : C.txD) + "40",
+                  background: (config.paperTrading ? C.y : C.txD) + "15",
+                  color: config.paperTrading ? C.y : C.txD,
+                  fontSize: 10, fontWeight: 700, fontFamily: "monospace", cursor: "pointer",
+                }}
+              >
+                {config.paperTrading ? "PAPER" : "LIVE"}
+              </button>
+            </div>
           </div>
 
           {/* Parameter Sliders */}
@@ -318,6 +352,9 @@ export default function BotView() {
             <ConfigSlider label="Max Positions" value={config.maxPositions} onChange={function(v) { upd("maxPositions", v); }} min={1} max={10} step={1} unit="" color={C.a} tip="Max concurrent open positions" />
             <ConfigSlider label="Stop Loss" value={config.stopLossPct} onChange={function(v) { upd("stopLossPct", v); }} min={1} max={25} step={0.5} unit="%" color={C.r} tip="Close if unrealized loss exceeds this %" />
             <ConfigSlider label="Max Hold Time" value={config.maxHoldHours} onChange={function(v) { upd("maxHoldHours", v); }} min={1} max={720} step={1} unit="h" color={C.y} tip="Force close after this many hours" />
+            {config.paperTrading && (
+              <ConfigSlider label="Paper Balance" value={config.paperBalance} onChange={function(v) { upd("paperBalance", v); }} min={100} max={100000} step={100} unit="$" color={C.y} tip="Simulated starting balance for paper trading" />
+            )}
             {config.spotHedge && (
               <ConfigSlider label="Hedge Ratio" value={+(config.spotHedgeRatio * 100).toFixed(0)} onChange={function(v) { upd("spotHedgeRatio", v / 100); }} min={10} max={200} step={5} unit="%" color={C.p} tip="Spot hedge as % of perp size" />
             )}

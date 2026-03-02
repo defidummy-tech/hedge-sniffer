@@ -241,6 +241,9 @@ export interface BotTrade {
   spotHedge: boolean;
   spotEntryPrice: number | null;
   spotExitPrice: number | null;
+  paper?: boolean;
+  lastFundingCheck?: number;
+  stopPrice?: number | null;
 }
 
 export interface BotConfig {
@@ -255,6 +258,8 @@ export interface BotConfig {
   maxHoldHours: number;
   spotHedge: boolean;
   spotHedgeRatio: number;
+  paperTrading: boolean;
+  paperBalance: number;
 }
 
 export interface BotStatus {

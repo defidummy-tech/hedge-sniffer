@@ -103,6 +103,8 @@ function defaultConfig(): BotConfig {
     maxHoldHours: parseFloat(process.env.BOT_MAX_HOLD_HOURS || "168"),
     spotHedge: parseBool(process.env.BOT_SPOT_HEDGE, false),
     spotHedgeRatio: parseFloat(process.env.BOT_SPOT_HEDGE_RATIO || "1"),
+    paperTrading: parseBool(process.env.BOT_PAPER_TRADING, false),
+    paperBalance: parseFloat(process.env.BOT_PAPER_BALANCE || "10000"),
   };
 }
 
@@ -172,9 +174,13 @@ export async function getAllTrades(): Promise<BotTrade[]> {
   return Array.isArray(diskTrades) ? diskTrades : [];
 }
 
-export async function getOpenTrades(): Promise<BotTrade[]> {
+export async function getOpenTrades(paperFilter?: boolean): Promise<BotTrade[]> {
   var all = await getAllTrades();
-  return all.filter(function(t) { return t.status === "open"; });
+  return all.filter(function(t) {
+    if (t.status !== "open") return false;
+    if (paperFilter !== undefined) return !!t.paper === paperFilter;
+    return true;
+  });
 }
 
 export async function addTrade(trade: BotTrade): Promise<void> {
@@ -203,9 +209,30 @@ export async function closeTrade(tradeId: string, exitPrice: number, exitFunding
   logAction("CLOSE", trade.coin + " " + exitReason + " PnL: $" + pnl.toFixed(2) + " Funding: $" + fundingEarned.toFixed(4));
 }
 
-export async function isAlreadyOpen(coin: string): Promise<boolean> {
-  var open = await getOpenTrades();
+export async function isAlreadyOpen(coin: string, paperFilter?: boolean): Promise<boolean> {
+  var open = await getOpenTrades(paperFilter);
   return open.some(function(t) { return t.coin === coin; });
+}
+
+export async function updateTradeFunding(tradeId: string, fundingDelta: number, newTimestamp: number): Promise<void> {
+  await ensureInit();
+  var trades = await getAllTrades();
+  var trade = trades.find(function(t) { return t.id === tradeId; });
+  if (!trade) return;
+  trade.fundingEarned += fundingDelta;
+  trade.totalReturn = trade.pnl + trade.fundingEarned;
+  trade.lastFundingCheck = newTimestamp;
+  saveAndSync(TRADES_FILE, "hedge:trades", trades);
+}
+
+export async function updateTradePnl(tradeId: string, unrealizedPnl: number): Promise<void> {
+  await ensureInit();
+  var trades = await getAllTrades();
+  var trade = trades.find(function(t) { return t.id === tradeId; });
+  if (!trade) return;
+  trade.pnl = unrealizedPnl;
+  trade.totalReturn = trade.pnl + trade.fundingEarned;
+  saveAndSync(TRADES_FILE, "hedge:trades", trades);
 }
 
 // ── Action Log (in-memory only — not critical to persist) ──
