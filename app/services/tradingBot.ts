@@ -99,6 +99,14 @@ function roundSigFigs(num: number, sigFigs: number = 5): number {
   return Math.round(num * magnitude) / magnitude;
 }
 
+// ── Round price for Hyperliquid exchange: ≤5 sig figs AND ≤5 decimal places ──
+// The exchange rejects prices with >5 decimal places (e.g. 0.013002 has 6 → rejected).
+// roundSigFigs alone doesn't cap decimal places for small prices.
+function roundPx(price: number): number {
+  var r = roundSigFigs(price, 5);
+  return parseFloat(r.toFixed(5));
+}
+
 // ── Format price for display (handles tiny tokens like $0.003) ──
 function fmtPx(p: number): string {
   if (p === 0) return "0";
@@ -157,13 +165,13 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
           var midPrice = parseFloat(mids[coin] || "0");
           if (midPrice <= 0) throw new Error("No mid price for " + coin);
 
-          var limitPrice = isBuy ? midPrice * 1.05 : midPrice * 0.95;
+          var limitPrice = roundPx(isBuy ? midPrice * 1.05 : midPrice * 0.95);
 
           await hl.exchange.placeOrder({
             coin: toPerpCoin(coin),
             is_buy: isBuy,
             sz: closeSize,
-            limit_px: limitPrice.toString(),
+            limit_px: limitPrice,
             order_type: { limit: { tif: "Ioc" as any } },
             reduce_only: true,
           });
@@ -534,14 +542,14 @@ async function checkExistingPositions(
             var closeSzi = pos ? parseFloat(pos.position.szi) : 0;
             var closeSz = Math.abs(closeSzi);
             var closeIsBuy = closeSzi < 0;
-            var closeLimitPx = closeIsBuy ? midPrice * 1.05 : midPrice * 0.95;
+            var closeLimitPx = roundPx(closeIsBuy ? midPrice * 1.05 : midPrice * 0.95);
 
             if (closeSz > 0) {
               await hl.exchange.placeOrder({
                 coin: toPerpCoin(trade.coin),
                 is_buy: closeIsBuy,
                 sz: closeSz,
-                limit_px: closeLimitPx.toString(),
+                limit_px: closeLimitPx,
                 order_type: { limit: { tif: "Ioc" as any } },
                 reduce_only: true,
               });
@@ -770,8 +778,8 @@ async function scanForOpportunities(
             slBuy = false;
           }
 
-          stopPrice = roundSigFigs(stopPrice, 5);
-          var slLimitPx = roundSigFigs(slBuy ? stopPrice * 1.10 : stopPrice * 0.90, 5);
+          stopPrice = roundPx(stopPrice);
+          var slLimitPx = roundPx(slBuy ? stopPrice * 1.10 : stopPrice * 0.90);
 
           var slSize = fillSize > 0 ? fillSize : size;
 
