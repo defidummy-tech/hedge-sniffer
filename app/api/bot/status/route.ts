@@ -3,7 +3,7 @@
 
 import { NextResponse } from "next/server";
 import * as journal from "../../../services/tradeJournal";
-import { getAccountStatus, getFundingRates } from "../../../services/tradingBot";
+import { getAccountStatus, getFundingRates, getPositionDetails } from "../../../services/tradingBot";
 
 export var dynamic = "force-dynamic";
 
@@ -21,9 +21,25 @@ export async function GET() {
       account.error = e.message || "Unknown error";
     }
 
-    // Fetch live funding rates for open positions
+    // Enrich open trades with live P&L and fetch funding rates
     var fundingRates: Record<string, number> = {};
     if (openTrades.length > 0) {
+      try {
+        var liveDetails = await getPositionDetails();
+        for (var i = 0; i < openTrades.length; i++) {
+          var details = liveDetails[openTrades[i].coin];
+          if (details) {
+            openTrades[i] = {
+              ...openTrades[i],
+              pnl: details.unrealizedPnl,
+              fundingEarned: details.cumFunding,
+              totalReturn: details.unrealizedPnl + details.cumFunding,
+            };
+          }
+        }
+      } catch (e: any) {
+        // Live data fetch failed — show journal data as-is
+      }
       try {
         fundingRates = await getFundingRates();
       } catch (e: any) {

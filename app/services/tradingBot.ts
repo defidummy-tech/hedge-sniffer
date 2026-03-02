@@ -63,6 +63,11 @@ function genId(): string {
   return "t_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6);
 }
 
+// ── Ensure coin has -PERP suffix for exchange.placeOrder (SDK may already include it) ──
+function toPerpCoin(coin: string): string {
+  return coin.endsWith("-PERP") ? coin : coin + "-PERP";
+}
+
 // ── Close ALL open positions on Hyperliquid ──
 export async function closeAllPositions(): Promise<{ closed: string[]; errors: string[] }> {
   var config = await journal.getConfig();
@@ -110,7 +115,7 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
           var limitPrice = isBuy ? midPrice * 1.05 : midPrice * 0.95;
 
           await hl.exchange.placeOrder({
-            coin: coin + "-PERP",
+            coin: toPerpCoin(coin),
             is_buy: isBuy,
             sz: closeSize,
             limit_px: limitPrice.toString(),
@@ -322,7 +327,7 @@ async function checkExistingPositions(
 
             if (closeSz > 0) {
               await hl.exchange.placeOrder({
-                coin: trade.coin + "-PERP",
+                coin: toPerpCoin(trade.coin),
                 is_buy: closeIsBuy,
                 sz: closeSz,
                 limit_px: closeLimitPx.toString(),
@@ -487,7 +492,7 @@ async function scanForOpportunities(
         var slLimitPx = slBuy ? stopPrice * 1.10 : stopPrice * 0.90;
 
         await hl.exchange.placeOrder({
-          coin: opp.coin + "-PERP",
+          coin: toPerpCoin(opp.coin),
           is_buy: slBuy,
           sz: size,
           limit_px: slLimitPx.toString(),
