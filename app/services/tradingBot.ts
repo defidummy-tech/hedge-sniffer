@@ -108,6 +108,12 @@ function roundPx(price: number): number {
   return parseFloat(r.toFixed(5));
 }
 
+// ── Minutes until next funding settlement (Hyperliquid settles every hour on the hour) ──
+function minutesUntilFundingSettlement(): number {
+  var now = new Date();
+  return 60 - now.getUTCMinutes();
+}
+
 // ── Format price for display (handles tiny tokens like $0.003) ──
 function fmtPx(p: number): string {
   if (p === 0) return "0";
@@ -291,6 +297,34 @@ async function recoverOrphanedPositions(hl: Hyperliquid, config: BotConfig): Pro
   }
 }
 
+// ── Clean up journal trades that have no matching exchange position (phantom trades) ──
+async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
+  var openTrades = await journal.getOpenTrades(false); // non-paper only
+  if (openTrades.length === 0) return;
+
+  var walletAddr = getWalletAddress();
+  var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
+  var liveCoins = new Set(
+    state.assetPositions
+      .filter(function(p) { return parseFloat(p.position.szi) !== 0; })
+      .map(function(p) { return p.position.coin; })
+  );
+
+  for (var trade of openTrades) {
+    if (liveCoins.has(trade.coin)) continue; // position exists on exchange — OK
+
+    // Journal trade has no matching exchange position — it's a phantom
+    journal.logAction("CLEANUP", "Phantom trade " + trade.coin + " " + trade.direction.toUpperCase() +
+      " — no matching position on exchange, closing journal entry");
+    await journal.closeTrade(trade.id, trade.entryPrice, 0, "phantom", 0, 0);
+    sendAlert("\uD83D\uDDD1\uFE0F", "PHANTOM CLEANED " + trade.coin, [
+      "Direction: " + trade.direction.toUpperCase(),
+      "Entry: $" + fmtPx(trade.entryPrice),
+      "No matching position found on exchange",
+    ]).catch(function() {});
+  }
+}
+
 // ── Main bot tick ──
 export async function botTick(): Promise<{
   scanned: number;
@@ -322,12 +356,17 @@ export async function botTick(): Promise<{
     return result;
   }
 
-  // ── Step 0: Recover orphaned positions (skip in paper mode — no real positions) ──
+  // ── Step 0: Recover orphaned positions + clean phantoms (skip in paper mode) ──
   if (!config.paperTrading) {
     try {
       await recoverOrphanedPositions(hl, config);
     } catch (e: any) {
       journal.logAction("ERROR", "Position recovery: " + e.message);
+    }
+    try {
+      await cleanupPhantomTrades(hl);
+    } catch (e: any) {
+      journal.logAction("ERROR", "Phantom cleanup: " + e.message);
     }
   }
 
@@ -464,6 +503,15 @@ async function checkPaperPositions(
       if (!exitReason && !fundingFavorsUs) exitReason = "funding_flipped";
       if (!exitReason && currentAPR < config.exitAPR) exitReason = "funding_reverted";
 
+      // Funding lock: skip non-stop-loss exits if close to funding settlement
+      if (exitReason && exitReason !== "stop_loss" && config.fundingLockMinutes > 0) {
+        var minsLeft = minutesUntilFundingSettlement();
+        if (minsLeft <= config.fundingLockMinutes) {
+          journal.logAction("LOCK", "[PAPER] " + trade.coin + " exit '" + exitReason + "' deferred — " + minsLeft + "min until funding settlement");
+          exitReason = null;
+        }
+      }
+
       if (exitReason) {
         await journal.closeTrade(trade.id, midPrice, fundingMap[trade.coin] || 0, exitReason, unrealizedPnl, trade.fundingEarned);
         result.closed.push(trade.coin + ":" + exitReason + " (paper)");
@@ -527,7 +575,8 @@ async function checkExistingPositions(
       var pos = state.assetPositions.find(function(p) { return p.position.coin === trade.coin; });
       var unrealizedPnl = pos ? parseFloat(pos.position.unrealizedPnl) : 0;
       var currentPrice = pos ? parseFloat(pos.position.entryPx) : trade.entryPrice; // fallback
-      var cumFunding = pos ? parseFloat(pos.position.cumFunding.sinceOpen) : 0;
+      // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid, negative = you received)
+      var cumFunding = pos ? -parseFloat(pos.position.cumFunding.sinceOpen) : 0;
 
       // Get mid price for PnL calc
       var mids = await hl.info.getAllMids();
@@ -550,6 +599,15 @@ async function checkExistingPositions(
         exitReason = "funding_flipped"; // funding direction changed — we're now paying
       } else if (currentAPR < config.exitAPR) {
         exitReason = "funding_reverted"; // magnitude dropped below exit threshold
+      }
+
+      // Funding lock: skip non-stop-loss exits if close to funding settlement
+      if (exitReason && exitReason !== "stop_loss" && config.fundingLockMinutes > 0) {
+        var minsLeft = minutesUntilFundingSettlement();
+        if (minsLeft <= config.fundingLockMinutes) {
+          journal.logAction("LOCK", trade.coin + " exit '" + exitReason + "' deferred — " + minsLeft + "min until funding settlement");
+          exitReason = null; // suppress exit, wait for settlement
+        }
       }
 
       if (exitReason) {

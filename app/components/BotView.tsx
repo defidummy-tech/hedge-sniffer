@@ -15,6 +15,7 @@ var DEFAULT_CONFIG: BotConfig = {
   maxPositions: 3,
   stopLossPct: 5,
   maxHoldHours: 168,
+  fundingLockMinutes: 10,
   spotHedge: false,
   spotHedgeRatio: 1.0,
   paperTrading: false,
@@ -347,11 +348,31 @@ export default function BotView() {
 
             <ConfigSlider label="Entry APR Threshold" value={+(config.entryAPR * 100).toFixed(0)} onChange={function(v) { upd("entryAPR", v / 100); }} min={100} max={5000} step={50} unit="%" color={C.o} tip="Min funding APR to open a position" />
             <ConfigSlider label="Exit APR Threshold" value={+(config.exitAPR * 100).toFixed(0)} onChange={function(v) { upd("exitAPR", v / 100); }} min={10} max={500} step={10} unit="%" color={C.g} tip="Close when funding drops below this APR" />
-            <ConfigSlider label="Max Position Size" value={config.maxPositionUSD} onChange={function(v) { upd("maxPositionUSD", v); }} min={10} max={10000} step={10} unit="$" color={C.a} tip="Max USD per position" />
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.txM, fontFamily: "monospace", marginBottom: 2 }}>
+                <span style={{ textTransform: "uppercase", fontWeight: 600 }}>Max Position Size</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ color: C.a, fontFamily: "monospace", fontWeight: 700, fontSize: 12 }}>$</span>
+                <input
+                  type="number" min={1} max={100000} step={1}
+                  value={config.maxPositionUSD}
+                  onChange={function(e) { var v = parseFloat(e.target.value); if (v > 0) upd("maxPositionUSD", v); }}
+                  style={{
+                    flex: 1, padding: "6px 8px", borderRadius: 6, fontSize: 12,
+                    fontFamily: "monospace", fontWeight: 700, color: C.a,
+                    background: C.sL, border: "1px solid " + C.b,
+                    outline: "none",
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 8, color: C.txD }}>Max USD per position (type any amount)</div>
+            </div>
             <ConfigSlider label="Leverage" value={config.leverage} onChange={function(v) { upd("leverage", v); }} min={1} max={20} step={1} unit="x" color={C.p} tip="Default leverage for new positions" />
             <ConfigSlider label="Max Positions" value={config.maxPositions} onChange={function(v) { upd("maxPositions", v); }} min={1} max={10} step={1} unit="" color={C.a} tip="Max concurrent open positions" />
             <ConfigSlider label="Stop Loss" value={config.stopLossPct} onChange={function(v) { upd("stopLossPct", v); }} min={1} max={25} step={0.5} unit="%" color={C.r} tip="Close if unrealized loss exceeds this %" />
             <ConfigSlider label="Max Hold Time" value={config.maxHoldHours} onChange={function(v) { upd("maxHoldHours", v); }} min={1} max={720} step={1} unit="h" color={C.y} tip="Force close after this many hours" />
+            <ConfigSlider label="Funding Lock" value={config.fundingLockMinutes} onChange={function(v) { upd("fundingLockMinutes", v); }} min={0} max={55} step={5} unit="min" color={C.p} tip="Hold position this many minutes before funding settlement (0 = off)" />
             {config.paperTrading && (
               <ConfigSlider label="Paper Balance" value={config.paperBalance} onChange={function(v) { upd("paperBalance", v); }} min={100} max={100000} step={100} unit="$" color={C.y} tip="Simulated starting balance for paper trading" />
             )}

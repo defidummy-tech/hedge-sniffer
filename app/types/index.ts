@@ -256,6 +256,7 @@ export interface BotConfig {
   maxPositions: number;
   stopLossPct: number;
   maxHoldHours: number;
+  fundingLockMinutes: number;
   spotHedge: boolean;
   spotHedgeRatio: number;
   paperTrading: boolean;
