@@ -68,6 +68,15 @@ function toPerpCoin(coin: string): string {
   return coin.endsWith("-PERP") ? coin : coin + "-PERP";
 }
 
+// ── Round a number to N significant figures (Hyperliquid requires ≤5 sig figs for prices) ──
+function roundSigFigs(num: number, sigFigs: number = 5): number {
+  if (num === 0) return 0;
+  var d = Math.ceil(Math.log10(Math.abs(num)));
+  var power = sigFigs - d;
+  var magnitude = Math.pow(10, power);
+  return Math.round(num * magnitude) / magnitude;
+}
+
 // ── Close ALL open positions on Hyperliquid ──
 export async function closeAllPositions(): Promise<{ closed: string[]; errors: string[] }> {
   var config = await journal.getConfig();
@@ -488,20 +497,48 @@ async function scanForOpportunities(
           slBuy = false; // sell to close long
         }
 
-        // Aggressive limit price to guarantee fill when trigger hits
-        var slLimitPx = slBuy ? stopPrice * 1.10 : stopPrice * 0.90;
+        // Round prices to 5 significant figures (Hyperliquid requirement)
+        // Without rounding, .toString() produces 17+ decimal places which the exchange rejects
+        stopPrice = roundSigFigs(stopPrice, 5);
+        var slLimitPx = roundSigFigs(slBuy ? stopPrice * 1.10 : stopPrice * 0.90, 5);
 
-        await hl.exchange.placeOrder({
+        // Use actual fill size from market order (may differ from calculated size due to rounding)
+        var slSize = size;
+        if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
+          var fillStatus = orderResult.response.data.statuses[0];
+          if (fillStatus && fillStatus.filled) {
+            slSize = parseFloat(fillStatus.filled.totalSz);
+          }
+        }
+
+        var slResponse = await hl.exchange.placeOrder({
           coin: toPerpCoin(opp.coin),
           is_buy: slBuy,
-          sz: size,
-          limit_px: slLimitPx.toString(),
-          order_type: { trigger: { triggerPx: stopPrice.toString(), isMarket: true, tpsl: "sl" as any } },
+          sz: slSize,
+          limit_px: slLimitPx,
+          order_type: { trigger: { triggerPx: stopPrice, isMarket: true, tpsl: "sl" } },
           reduce_only: true,
           grouping: "normalTpsl",
         });
 
-        journal.logAction("SL", opp.coin + " stop-loss set at $" + stopPrice.toFixed(2) + " (" + config.stopLossPct + "% loss)");
+        // Check response for acceptance — HL returns statuses with resting/filled/error
+        var slAccepted = false;
+        if (slResponse && slResponse.response && slResponse.response.data && slResponse.response.data.statuses) {
+          var slStatus = slResponse.response.data.statuses[0];
+          if (slStatus && slStatus.resting) {
+            slAccepted = true;
+          } else if (slStatus && slStatus.filled) {
+            slAccepted = true; // shouldn't happen for trigger but handle it
+          } else if (slStatus && slStatus.error) {
+            throw new Error(slStatus.error);
+          }
+        }
+
+        if (slAccepted) {
+          journal.logAction("SL", opp.coin + " stop-loss set at $" + stopPrice.toFixed(4) + " (" + config.stopLossPct + "% loss)");
+        } else {
+          journal.logAction("WARN", "Stop-loss response unclear for " + opp.coin + ": " + JSON.stringify(slResponse).slice(0, 200));
+        }
       } catch (slErr: any) {
         // Don't fail the whole trade — SL is best-effort; cron tick also checks
         journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
