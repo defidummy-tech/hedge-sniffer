@@ -6,6 +6,7 @@ import { ethers } from "ethers";
 import { readFileSync } from "fs";
 import type { BotTrade, BotConfig } from "../types";
 import * as journal from "./tradeJournal";
+import { sendAlert } from "./telegram";
 
 // ── Read private key from env var OR Render secret file ──
 function getPrivateKey(): string | null {
@@ -189,6 +190,14 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
     journal.logAction("ERROR", "Kill switch SDK: " + e.message);
   }
 
+  // Telegram alert for kill switch
+  if (closed.length > 0 || errors.length > 0) {
+    sendAlert("\uD83D\uDC80", "KILL SWITCH", [
+      "Closed: " + (closed.length > 0 ? closed.join(", ") : "none"),
+      errors.length > 0 ? "Errors: " + errors.join(", ") : "",
+    ].filter(Boolean)).catch(function() {});
+  }
+
   return { closed: closed, errors: errors };
 }
 
@@ -220,6 +229,12 @@ async function closeAllPaperPositions(): Promise<{ closed: string[]; errors: str
     }
   } catch (e: any) {
     errors.push("Paper kill: " + e.message);
+  }
+
+  if (closed.length > 0) {
+    sendAlert("\uD83D\uDC80", "[PAPER] KILL SWITCH", [
+      "Closed: " + closed.join(", "),
+    ]).catch(function() {});
   }
 
   return { closed: closed, errors: errors };
@@ -454,6 +469,15 @@ async function checkPaperPositions(
         result.closed.push(trade.coin + ":" + exitReason + " (paper)");
         journal.logAction("CLOSE", "[PAPER] " + trade.coin + " " + exitReason +
           " PnL: $" + unrealizedPnl.toFixed(2) + " Funding: $" + trade.fundingEarned.toFixed(4));
+
+        var totalPnl = unrealizedPnl + trade.fundingEarned;
+        sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : "\uD83D\uDD34",
+          "[PAPER] CLOSE " + trade.coin + " " + trade.direction.toUpperCase(),
+          [
+            "Reason: " + exitReason,
+            "Trade P&L: $" + totalPnl.toFixed(2) + " (price: $" + unrealizedPnl.toFixed(2) + ", funding: $" + trade.fundingEarned.toFixed(4) + ")",
+            "Exit Price: $" + fmtPx(midPrice),
+          ]).catch(function() {});
       }
     } catch (e: any) {
       result.errors.push("Paper check " + trade.coin + ": " + e.message);
@@ -565,6 +589,17 @@ async function checkExistingPositions(
         if (closedOk) {
           await journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding);
           result.closed.push(trade.coin + ":" + exitReason);
+
+          var totalPnl = unrealizedPnl + cumFunding;
+          var balInfo = await getAccountStatus();
+          sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : "\uD83D\uDD34",
+            "CLOSE " + trade.coin + " " + trade.direction.toUpperCase(),
+            [
+              "Reason: " + exitReason,
+              "Trade P&L: $" + totalPnl.toFixed(2) + " (price: $" + unrealizedPnl.toFixed(2) + ", funding: $" + cumFunding.toFixed(4) + ")",
+              "Exit Price: $" + fmtPx(midPrice),
+              "Balance: $" + balInfo.balance.toFixed(2),
+            ]).catch(function() {});
         }
       }
     } catch (e: any) {
@@ -688,6 +723,15 @@ async function scanForOpportunities(
         journal.logAction("OPEN", "[PAPER] " + opp.coin + " " + opp.direction.toUpperCase() +
           " $" + config.maxPositionUSD + " @ $" + fmtPx(fillPrice) +
           " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + fmtPx(simStopPrice) + ")");
+
+        sendAlert("\uD83D\uDCDD", "[PAPER] OPEN " + opp.coin + " " + opp.direction.toUpperCase(), [
+          "Size: $" + config.maxPositionUSD + " @ " + lev + "x",
+          "Price: $" + fmtPx(fillPrice),
+          "APR: " + (opp.fundingAPR * 100).toFixed(0) + "%",
+          "Stop-Loss: $" + fmtPx(simStopPrice),
+          "Paper Balance: $" + config.paperBalance.toFixed(2),
+        ]).catch(function() {});
+
         result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2) + " (paper)");
         openCount++;
       } catch (e: any) {
@@ -728,6 +772,10 @@ async function scanForOpportunities(
         if (orderError || fillPrice === 0) {
           var rejectMsg = orderError || "Order not filled (no fill in response)";
           journal.logAction("REJECT", opp.coin + " " + opp.direction.toUpperCase() + " order rejected: " + rejectMsg);
+          sendAlert("\u26A0\uFE0F", "REJECTED " + opp.coin + " " + opp.direction.toUpperCase(), [
+            "Reason: " + rejectMsg,
+            "Size: $" + config.maxPositionUSD + " @ " + lev + "x",
+          ]).catch(function() {});
           result.errors.push(opp.coin + ": " + rejectMsg);
           continue; // Skip — no position opened, don't record trade
         }
@@ -813,6 +861,15 @@ async function scanForOpportunities(
         } catch (slErr: any) {
           journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
         }
+
+        // Telegram alert for new trade
+        var balInfo = await getAccountStatus();
+        sendAlert("\uD83D\uDFE2", "OPEN " + opp.coin + " " + opp.direction.toUpperCase(), [
+          "Size: $" + config.maxPositionUSD + " @ " + lev + "x",
+          "Price: $" + fmtPx(fillPrice),
+          "APR: " + (opp.fundingAPR * 100).toFixed(0) + "%",
+          "Balance: $" + balInfo.balance.toFixed(2),
+        ]).catch(function() {});
 
         result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fmtPx(fillPrice));
         openCount++;
