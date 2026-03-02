@@ -99,6 +99,15 @@ function roundSigFigs(num: number, sigFigs: number = 5): number {
   return Math.round(num * magnitude) / magnitude;
 }
 
+// ── Format price for display (handles tiny tokens like $0.003) ──
+function fmtPx(p: number): string {
+  if (p === 0) return "0";
+  if (p >= 100) return p.toFixed(2);
+  if (p >= 1) return p.toFixed(4);
+  if (p >= 0.01) return p.toFixed(6);
+  return p.toPrecision(4);
+}
+
 // ── Close ALL open positions on Hyperliquid ──
 export async function closeAllPositions(): Promise<{ closed: string[]; errors: string[] }> {
   var config = await journal.getConfig();
@@ -669,8 +678,8 @@ async function scanForOpportunities(
 
         await journal.addTrade(paperTrade);
         journal.logAction("OPEN", "[PAPER] " + opp.coin + " " + opp.direction.toUpperCase() +
-          " $" + config.maxPositionUSD + " @ $" + fillPrice.toFixed(2) +
-          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + simStopPrice.toFixed(4) + ")");
+          " $" + config.maxPositionUSD + " @ $" + fmtPx(fillPrice) +
+          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + fmtPx(simStopPrice) + ")");
         result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2) + " (paper)");
         openCount++;
       } catch (e: any) {
@@ -688,14 +697,36 @@ async function scanForOpportunities(
         var isBuy = opp.direction === "long";
         var orderResult = await hl.custom.marketOpen(opp.coin, isBuy, size);
 
-        // Determine fill price
-        var fillPrice = opp.midPrice;
+        // Validate the order actually filled
+        var fillPrice = 0;
+        var fillSize = 0;
+        var orderError = "";
+
         if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
           var statuses = orderResult.response.data.statuses;
-          if (statuses[0] && statuses[0].filled) {
-            fillPrice = parseFloat(statuses[0].filled.avgPx);
+          var status0 = statuses[0];
+          if (status0 && status0.filled) {
+            fillPrice = parseFloat(status0.filled.avgPx);
+            fillSize = parseFloat(status0.filled.totalSz);
+          } else if (status0 && status0.resting) {
+            // Resting limit — use mid price estimate
+            fillPrice = opp.midPrice;
+            fillSize = size;
+          } else if (status0 && status0.error) {
+            orderError = status0.error;
           }
         }
+
+        if (orderError || fillPrice === 0) {
+          var rejectMsg = orderError || "Order not filled (no fill in response)";
+          journal.logAction("REJECT", opp.coin + " " + opp.direction.toUpperCase() + " order rejected: " + rejectMsg);
+          result.errors.push(opp.coin + ": " + rejectMsg);
+          continue; // Skip — no position opened, don't record trade
+        }
+
+        journal.logAction("OPEN", opp.coin + " " + opp.direction.toUpperCase() +
+          " $" + config.maxPositionUSD + " @ $" + fmtPx(fillPrice) +
+          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, filled " + fillSize + ")");
 
         // Record trade
         var trade: BotTrade = {
@@ -742,13 +773,7 @@ async function scanForOpportunities(
           stopPrice = roundSigFigs(stopPrice, 5);
           var slLimitPx = roundSigFigs(slBuy ? stopPrice * 1.10 : stopPrice * 0.90, 5);
 
-          var slSize = size;
-          if (orderResult && orderResult.response && orderResult.response.data && orderResult.response.data.statuses) {
-            var fillStatus = orderResult.response.data.statuses[0];
-            if (fillStatus && fillStatus.filled) {
-              slSize = parseFloat(fillStatus.filled.totalSz);
-            }
-          }
+          var slSize = fillSize > 0 ? fillSize : size;
 
           var slResponse = await hl.exchange.placeOrder({
             coin: toPerpCoin(opp.coin),
@@ -757,7 +782,7 @@ async function scanForOpportunities(
             limit_px: slLimitPx,
             order_type: { trigger: { triggerPx: stopPrice, isMarket: true, tpsl: "sl" } },
             reduce_only: true,
-            grouping: "normalTpsl",
+            grouping: "na",
           });
 
           var slAccepted = false;
@@ -773,7 +798,7 @@ async function scanForOpportunities(
           }
 
           if (slAccepted) {
-            journal.logAction("SL", opp.coin + " stop-loss set at $" + stopPrice.toFixed(4) + " (" + config.stopLossPct + "% loss)");
+            journal.logAction("SL", opp.coin + " stop-loss set at $" + fmtPx(stopPrice) + " (" + config.stopLossPct + "% loss)");
           } else {
             journal.logAction("WARN", "Stop-loss response unclear for " + opp.coin + ": " + JSON.stringify(slResponse).slice(0, 200));
           }
@@ -781,7 +806,7 @@ async function scanForOpportunities(
           journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
         }
 
-        result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2));
+        result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fmtPx(fillPrice));
         openCount++;
 
       } catch (e: any) {
