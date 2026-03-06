@@ -2,16 +2,13 @@
 
 export interface MarketMapping {
   sym: string;
-  coin: string;            // Hyperliquid API coin name (e.g. "BTC" or "vntl:OPENAI")
+  coin: string;            // Hyperliquid API coin name (e.g. "BTC" or "vntl:OPENAI" or "xyz:HYUNDAI")
   searchTerms: string[];   // Keywords to match in Polymarket event titles
   cat: string;
   name: string;
   hasPerp: boolean;        // Whether this asset has a Hyperliquid perp
-  isVentual: boolean;      // Whether this is a Ventuals/pre-launch token
+  isVentual: boolean;      // Whether this is a Ventuals/pre-launch token or builder-dex token
 }
-
-// Ventuals/pre-launch tokens known on Hyperliquid
-export var VENTUAL_COINS = ["vntl:OPENAI", "vntl:SPACEX", "vntl:ANTHROPIC"];
 
 export const PRIORITY_MAPPINGS: MarketMapping[] = [
   { sym: "BTC",       coin: "BTC",             name: "Bitcoin",       cat: "Crypto / L1",        hasPerp: true,  isVentual: false, searchTerms: ["bitcoin", "btc"] },
@@ -23,10 +20,6 @@ export const PRIORITY_MAPPINGS: MarketMapping[] = [
   { sym: "LINK",      coin: "LINK",            name: "Chainlink",     cat: "Oracle / DeFi",     hasPerp: true,  isVentual: false, searchTerms: ["chainlink", "link"] },
   { sym: "TRUMP",     coin: "TRUMP",           name: "Trump Media",   cat: "Politics / Crypto",  hasPerp: true,  isVentual: false, searchTerms: ["trump"] },
   { sym: "MSTR",      coin: "MSTR",            name: "MicroStrategy", cat: "BTC Treasury",       hasPerp: true,  isVentual: false, searchTerms: ["microstrategy", "mstr"] },
-  // Ventuals / Pre-IPO tokens (use vntl: prefix for HL API)
-  { sym: "OPENAI",    coin: "vntl:OPENAI",     name: "OpenAI",        cat: "AI / Pre-IPO",       hasPerp: true,  isVentual: true,  searchTerms: ["openai"] },
-  { sym: "SPACEX",    coin: "vntl:SPACEX",     name: "SpaceX",        cat: "Space / Pre-IPO",    hasPerp: true,  isVentual: true,  searchTerms: ["spacex", "space x"] },
-  { sym: "ANTHROPIC", coin: "vntl:ANTHROPIC",  name: "Anthropic",     cat: "AI / Pre-IPO",       hasPerp: true,  isVentual: true,  searchTerms: ["anthropic", "claude"] },
 ];
 
 // Keep backward-compatible export
@@ -39,12 +32,13 @@ export function extractThreshold(question: string): number | null {
   return parseFloat(match[1].replace(/,/g, ""));
 }
 
-/** Dynamically build the full asset list from HL perps + priority mappings */
+/** Dynamically build the full asset list from HL perps + priority mappings + builder dex assets */
 export function buildAssetList(
   hlNames: string[],
   hlFunding: Record<string, number>,
   hlVolume: Record<string, number>,
-  hlOI: Record<string, number>
+  hlOI: Record<string, number>,
+  builderDexAssets?: Array<{ coin: string; dex: string; funding: number; volume: number }>
 ): MarketMapping[] {
   var result: MarketMapping[] = [];
   var seen = new Set<string>();
@@ -52,14 +46,9 @@ export function buildAssetList(
   // Phase 1: All priority-mapped assets first
   for (var i = 0; i < PRIORITY_MAPPINGS.length; i++) {
     var pm = PRIORITY_MAPPINGS[i];
-    if (pm.isVentual) {
-      // Ventuals are always included — their data comes from separate fetches
-      result.push(pm);
-    } else {
-      // Update hasPerp based on whether HL actually lists it
-      var hasIt = hlNames.indexOf(pm.sym) !== -1;
-      result.push({ ...pm, hasPerp: hasIt || pm.hasPerp });
-    }
+    // Update hasPerp based on whether HL actually lists it
+    var hasIt = hlNames.indexOf(pm.sym) !== -1;
+    result.push({ ...pm, hasPerp: hasIt || pm.hasPerp });
     seen.add(pm.sym);
   }
 
@@ -91,6 +80,37 @@ export function buildAssetList(
       isVentual: false,
       searchTerms: [c.name.toLowerCase()],
     });
+    seen.add(c.name);
+  }
+
+  // Phase 3: Builder-dex assets (xyz:HYUNDAI, vntl:OPENAI, etc.)
+  if (builderDexAssets) {
+    var bdCandidates: Array<{ coin: string; dex: string; absAPR: number; volume: number }> = [];
+    for (var bi = 0; bi < builderDexAssets.length; bi++) {
+      var bda = builderDexAssets[bi];
+      if (seen.has(bda.coin)) continue;
+      var bdAPR = Math.abs(bda.funding * 8760);
+      if (bdAPR > 0.10 || bda.volume > 100000) {
+        bdCandidates.push({ coin: bda.coin, dex: bda.dex, absAPR: bdAPR, volume: bda.volume });
+      }
+    }
+
+    bdCandidates.sort(function(a, b) { return b.absAPR - a.absAPR; });
+
+    for (var bk = 0; bk < Math.min(20, bdCandidates.length); bk++) {
+      var bd = bdCandidates[bk];
+      var displayName = bd.coin.indexOf(":") !== -1 ? bd.coin.split(":")[1] : bd.coin;
+      result.push({
+        sym: bd.coin,
+        coin: bd.coin,
+        name: displayName,
+        cat: "Builder / " + bd.dex,
+        hasPerp: true,
+        isVentual: true,
+        searchTerms: [displayName.toLowerCase()],
+      });
+      seen.add(bd.coin);
+    }
   }
 
   return result;

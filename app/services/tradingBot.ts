@@ -91,6 +91,132 @@ function toPerpCoin(coin: string): string {
   return coin.endsWith("-PERP") ? coin : coin + "-PERP";
 }
 
+// ── Raw Hyperliquid info API helper (for multi-dex queries the SDK doesn't support) ──
+var HL_INFO_URL = "https://api.hyperliquid.xyz/info";
+
+async function hlInfoPost(body: any): Promise<any> {
+  var res = await fetch(HL_INFO_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error("HL API " + res.status);
+  return res.json();
+}
+
+// ── Discover all builder dexes and return their universe+funding ──
+async function fetchBuilderDexOpportunities(): Promise<Array<{
+  coin: string; dex: string; fundingRate: number; fundingAPR: number;
+  midPrice: number; maxLev: number; szDecimals: number;
+}>> {
+  var results: Array<{
+    coin: string; dex: string; fundingRate: number; fundingAPR: number;
+    midPrice: number; maxLev: number; szDecimals: number;
+  }> = [];
+
+  try {
+    var dexes: Array<{ name: string }> = await hlInfoPost({ type: "perpDexs" });
+    if (!Array.isArray(dexes) || dexes.length === 0) return results;
+
+    var dexResults = await Promise.allSettled(
+      dexes.map(async function(dex) {
+        var dexMeta = await hlInfoPost({ type: "metaAndAssetCtxs", dex: dex.name });
+        return { dexName: dex.name, meta: dexMeta[0], ctxs: dexMeta[1] };
+      })
+    );
+
+    for (var dr of dexResults) {
+      if (dr.status !== "fulfilled") continue;
+      var dexData = dr.value;
+      if (!dexData.meta || !dexData.meta.universe) continue;
+
+      dexData.meta.universe.forEach(function(u: any, i: number) {
+        var ctx = dexData.ctxs[i];
+        if (!ctx) return;
+        var rate = parseFloat(ctx.funding || "0");
+        var mid = parseFloat(ctx.midPx || ctx.markPx || "0");
+        if (mid <= 0) return;
+        var fullCoin = dexData.dexName + ":" + u.name;
+        results.push({
+          coin: fullCoin,
+          dex: dexData.dexName,
+          fundingRate: rate,
+          fundingAPR: rate * 8760,
+          midPrice: mid,
+          maxLev: u.maxLeverage || 3,
+          szDecimals: u.szDecimals || 0,
+        });
+      });
+    }
+  } catch (e: any) {
+    // Non-critical: builder dex discovery failed, main dex still works
+  }
+
+  return results;
+}
+
+// ── Fetch funding rates for builder-dex coins that have open trades ──
+async function fetchBuilderDexFunding(coins: string[]): Promise<{ fundingMap: Record<string, number>; mids: Record<string, string> }> {
+  var fundingMap: Record<string, number> = {};
+  var mids: Record<string, string> = {};
+
+  // Group by dex prefix
+  var dexGroups: Record<string, string[]> = {};
+  for (var c of coins) {
+    var colonIdx = c.indexOf(":");
+    if (colonIdx === -1) continue;
+    var dexName = c.substring(0, colonIdx);
+    if (!dexGroups[dexName]) dexGroups[dexName] = [];
+    dexGroups[dexName].push(c);
+  }
+
+  var dexNames = Object.keys(dexGroups);
+  if (dexNames.length === 0) return { fundingMap: fundingMap, mids: mids };
+
+  var dexResults = await Promise.allSettled(
+    dexNames.map(async function(dex) {
+      var dexMeta = await hlInfoPost({ type: "metaAndAssetCtxs", dex: dex });
+      var dexMids = await hlInfoPost({ type: "allMids", dex: dex });
+      return { dexName: dex, meta: dexMeta[0], ctxs: dexMeta[1], mids: dexMids };
+    })
+  );
+
+  for (var dr of dexResults) {
+    if (dr.status !== "fulfilled") continue;
+    var data = dr.value;
+    if (data.meta && data.meta.universe) {
+      data.meta.universe.forEach(function(u: any, i: number) {
+        var ctx = data.ctxs[i];
+        if (ctx && ctx.funding) {
+          fundingMap[data.dexName + ":" + u.name] = parseFloat(ctx.funding) * 8760;
+        }
+      });
+    }
+    if (data.mids) {
+      for (var coin in data.mids) {
+        mids[data.dexName + ":" + coin] = data.mids[coin];
+      }
+    }
+  }
+
+  return { fundingMap: fundingMap, mids: mids };
+}
+
+// ── Check if a coin is in stop-loss cooldown ──
+async function isInSLCooldown(coin: string, cooldownHours: number): Promise<boolean> {
+  if (cooldownHours <= 0) return false;
+  var trades = await journal.getAllTrades();
+  var cooldownMs = cooldownHours * 3600000;
+  var now = Date.now();
+  for (var i = trades.length - 1; i >= 0; i--) {
+    var t = trades[i];
+    if (t.coin === coin && t.exitReason === "stop_loss" && t.exitTime) {
+      if (now - t.exitTime < cooldownMs) return true;
+    }
+  }
+  return false;
+}
+
 // ── Round a number to N significant figures (Hyperliquid requires ≤5 sig figs for prices) ──
 function roundSigFigs(num: number, sigFigs: number = 5): number {
   if (num === 0) return 0;
@@ -416,6 +542,16 @@ async function accruePaperFunding(hl: Hyperliquid): Promise<void> {
     }
   });
 
+  // Also fetch builder-dex hourly rates for paper trades
+  var accrueBuilderCoins = openTrades.filter(function(t) { return t.coin.indexOf(":") !== -1; }).map(function(t) { return t.coin; });
+  if (accrueBuilderCoins.length > 0) {
+    try {
+      var bdAccrue = await fetchBuilderDexFunding(accrueBuilderCoins);
+      // Convert APR back to hourly rate for accrual
+      for (var abk in bdAccrue.fundingMap) fundingMap[abk] = bdAccrue.fundingMap[abk] / 8760;
+    } catch (e: any) { /* non-critical */ }
+  }
+
   var now = Date.now();
 
   for (var trade of openTrades) {
@@ -463,6 +599,16 @@ async function checkPaperPositions(
     }
   });
 
+  // Fetch builder-dex funding/mids for paper trades on non-main dexes
+  var paperBuilderCoins = openTrades.filter(function(t) { return t.coin.indexOf(":") !== -1; }).map(function(t) { return t.coin; });
+  if (paperBuilderCoins.length > 0) {
+    try {
+      var bdPaper = await fetchBuilderDexFunding(paperBuilderCoins);
+      for (var pbk in bdPaper.fundingMap) fundingMap[pbk] = bdPaper.fundingMap[pbk];
+      for (var pmk in bdPaper.mids) mids[pmk] = bdPaper.mids[pmk];
+    } catch (e: any) { /* non-critical */ }
+  }
+
   for (var trade of openTrades) {
     try {
       var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
@@ -499,12 +645,20 @@ async function checkPaperPositions(
         exitReason = "stop_loss";
       }
 
+      // Take-profit check
+      if (!exitReason && config.takeProfitPct > 0 && unrealizedPnl > 0) {
+        var profitPct = (unrealizedPnl / trade.sizeUSD) * 100;
+        if (profitPct >= config.takeProfitPct) {
+          exitReason = "take_profit";
+        }
+      }
+
       if (!exitReason && holdHours > config.maxHoldHours) exitReason = "max_hold";
       if (!exitReason && !fundingFavorsUs) exitReason = "funding_flipped";
       if (!exitReason && currentAPR < config.exitAPR) exitReason = "funding_reverted";
 
-      // Funding lock: skip non-stop-loss exits if close to funding settlement
-      if (exitReason && exitReason !== "stop_loss" && config.fundingLockMinutes > 0) {
+      // Funding lock: skip non-critical exits if close to funding settlement
+      if (exitReason && exitReason !== "stop_loss" && exitReason !== "take_profit" && config.fundingLockMinutes > 0) {
         var minsLeft = minutesUntilFundingSettlement();
         if (minsLeft <= config.fundingLockMinutes) {
           journal.logAction("LOCK", "[PAPER] " + trade.coin + " exit '" + exitReason + "' deferred — " + minsLeft + "min until funding settlement");
@@ -519,7 +673,7 @@ async function checkPaperPositions(
           " PnL: $" + unrealizedPnl.toFixed(2) + " Funding: $" + trade.fundingEarned.toFixed(4));
 
         var totalPnl = unrealizedPnl + trade.fundingEarned;
-        sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : "\uD83D\uDD34",
+        sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : exitReason === "take_profit" ? "\uD83C\uDFAF" : "\uD83D\uDD34",
           "[PAPER] CLOSE " + trade.coin + " " + trade.direction.toUpperCase(),
           [
             "Reason: " + exitReason,
@@ -566,6 +720,17 @@ async function checkExistingPositions(
     }
   });
 
+  // Fetch builder-dex funding for any open trades on non-main dexes
+  var builderDexCoins = openTrades.filter(function(t) { return t.coin.indexOf(":") !== -1; }).map(function(t) { return t.coin; });
+  var builderMids: Record<string, string> = {};
+  if (builderDexCoins.length > 0) {
+    try {
+      var bdData = await fetchBuilderDexFunding(builderDexCoins);
+      for (var bk in bdData.fundingMap) fundingMap[bk] = bdData.fundingMap[bk];
+      builderMids = bdData.mids;
+    } catch (e: any) { /* non-critical */ }
+  }
+
   for (var trade of openTrades) {
     try {
       var currentAPR = Math.abs(fundingMap[trade.coin] || 0);
@@ -578,8 +743,9 @@ async function checkExistingPositions(
       // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid, negative = you received)
       var cumFunding = pos ? -parseFloat(pos.position.cumFunding.sinceOpen) : 0;
 
-      // Get mid price for PnL calc
+      // Get mid price for PnL calc (check builder dex mids too)
       var mids = await hl.info.getAllMids();
+      for (var bmk in builderMids) mids[bmk] = builderMids[bmk];
       var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
 
       var exitReason: string | null = null;
@@ -593,16 +759,24 @@ async function checkExistingPositions(
       var lossPct = Math.abs(unrealizedPnl) / trade.sizeUSD * 100;
       if (unrealizedPnl < 0 && lossPct > config.stopLossPct) {
         exitReason = "stop_loss";
-      } else if (holdHours > config.maxHoldHours) {
+      } else if (config.takeProfitPct > 0 && unrealizedPnl > 0) {
+        var profitPct = (unrealizedPnl / trade.sizeUSD) * 100;
+        if (profitPct >= config.takeProfitPct) {
+          exitReason = "take_profit";
+        }
+      }
+      if (!exitReason && holdHours > config.maxHoldHours) {
         exitReason = "max_hold";
-      } else if (!fundingFavorsUs) {
+      }
+      if (!exitReason && !fundingFavorsUs) {
         exitReason = "funding_flipped"; // funding direction changed — we're now paying
-      } else if (currentAPR < config.exitAPR) {
+      }
+      if (!exitReason && currentAPR < config.exitAPR) {
         exitReason = "funding_reverted"; // magnitude dropped below exit threshold
       }
 
-      // Funding lock: skip non-stop-loss exits if close to funding settlement
-      if (exitReason && exitReason !== "stop_loss" && config.fundingLockMinutes > 0) {
+      // Funding lock: skip non-critical exits if close to funding settlement
+      if (exitReason && exitReason !== "stop_loss" && exitReason !== "take_profit" && config.fundingLockMinutes > 0) {
         var minsLeft = minutesUntilFundingSettlement();
         if (minsLeft <= config.fundingLockMinutes) {
           journal.logAction("LOCK", trade.coin + " exit '" + exitReason + "' deferred — " + minsLeft + "min until funding settlement");
@@ -613,11 +787,17 @@ async function checkExistingPositions(
       if (exitReason) {
         // Close the position via market order
         var closedOk = false;
+        var isBuilderDexCoin = trade.coin.indexOf(":") !== -1;
         try {
+          if (isBuilderDexCoin) {
+            throw new Error("builder-dex — use direct placeOrder");
+          }
           await hl.custom.marketClose(trade.coin);
           closedOk = true;
         } catch (e: any) {
-          journal.logAction("WARN", "marketClose " + trade.coin + " failed: " + e.message + " — trying manual close");
+          if (!isBuilderDexCoin) {
+            journal.logAction("WARN", "marketClose " + trade.coin + " failed: " + e.message + " — trying manual close");
+          }
 
           // Fallback: manual close using exchange.placeOrder directly
           try {
@@ -650,7 +830,7 @@ async function checkExistingPositions(
 
           var totalPnl = unrealizedPnl + cumFunding;
           var balInfo = await getAccountStatus();
-          sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : "\uD83D\uDD34",
+          sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : exitReason === "take_profit" ? "\uD83C\uDFAF" : "\uD83D\uDD34",
             "CLOSE " + trade.coin + " " + trade.direction.toUpperCase(),
             [
               "Reason: " + exitReason,
@@ -718,10 +898,31 @@ async function scanForOpportunities(
 
   result.scanned = meta.universe.length;
 
+  // Also scan builder dexes (xyz:HYUNDAI, vntl:OPENAI, etc.)
+  try {
+    var builderAssets = await fetchBuilderDexOpportunities();
+    for (var ba of builderAssets) {
+      result.scanned++;
+      if (Math.abs(ba.fundingAPR) >= config.entryAPR) {
+        opportunities.push({
+          coin: ba.coin,
+          fundingRate: ba.fundingRate,
+          fundingAPR: ba.fundingAPR,
+          direction: ba.fundingRate > 0 ? "short" : "long",
+          midPrice: ba.midPrice,
+          maxLev: ba.maxLev,
+          szDecimals: ba.szDecimals,
+        });
+      }
+    }
+  } catch (e: any) {
+    journal.logAction("WARN", "Builder dex scan failed: " + e.message);
+  }
+
   // Sort by highest absolute funding rate
   opportunities.sort(function(a, b) { return Math.abs(b.fundingAPR) - Math.abs(a.fundingAPR); });
 
-  journal.logAction("SCAN", "Found " + opportunities.length + " opportunities above " + (config.entryAPR * 100).toFixed(0) + "% APR");
+  journal.logAction("SCAN", "Found " + opportunities.length + " opportunities above " + (config.entryAPR * 100).toFixed(0) + "% APR (scanned " + result.scanned + " perps)");
 
   for (var opp of opportunities) {
     if (openCount >= config.maxPositions) break;
@@ -729,6 +930,13 @@ async function scanForOpportunities(
     // Skip if already have position (filter by current mode)
     if (await journal.isAlreadyOpen(opp.coin, isPaper ? true : undefined)) {
       result.skipped.push(opp.coin + ":already_open");
+      continue;
+    }
+
+    // Skip if coin is in stop-loss cooldown
+    if (await isInSLCooldown(opp.coin, config.slCooldownHours)) {
+      result.skipped.push(opp.coin + ":sl_cooldown");
+      journal.logAction("COOLDOWN", opp.coin + " skipped — in SL cooldown (" + config.slCooldownHours + "h)");
       continue;
     }
 
@@ -803,9 +1011,24 @@ async function scanForOpportunities(
         // Set leverage
         await hl.exchange.updateLeverage(opp.coin, "cross", lev);
 
-        // Place market order
+        // Place market order (use direct placeOrder for builder-dex coins)
         var isBuy = opp.direction === "long";
-        var orderResult = await hl.custom.marketOpen(opp.coin, isBuy, size);
+        var isBuilderDex = opp.coin.indexOf(":") !== -1;
+        var orderResult: any;
+
+        if (isBuilderDex) {
+          var limitPx = roundPx(isBuy ? opp.midPrice * 1.05 : opp.midPrice * 0.95);
+          orderResult = await hl.exchange.placeOrder({
+            coin: toPerpCoin(opp.coin),
+            is_buy: isBuy,
+            sz: size,
+            limit_px: limitPx,
+            order_type: { limit: { tif: "Ioc" as any } },
+            reduce_only: false,
+          });
+        } else {
+          orderResult = await hl.custom.marketOpen(opp.coin, isBuy, size);
+        }
 
         // Validate the order actually filled
         var fillPrice = 0;
@@ -1131,7 +1354,7 @@ async function getPaperPositionDetails(): Promise<Record<string, { unrealizedPnl
   return result;
 }
 
-// ── Get current funding rates for all perps ──
+// ── Get current funding rates for all perps (including builder dexes) ──
 export async function getFundingRates(): Promise<Record<string, number>> {
   var config = await journal.getConfig();
   var rates: Record<string, number> = {};
@@ -1148,6 +1371,14 @@ export async function getFundingRates(): Promise<Record<string, number>> {
         rates[u.name] = parseFloat(ctx.funding) * 8760; // APR
       }
     });
+
+    // Also fetch builder-dex funding rates
+    try {
+      var builderAssets = await fetchBuilderDexOpportunities();
+      for (var ba of builderAssets) {
+        rates[ba.coin] = ba.fundingAPR;
+      }
+    } catch (e: any) { /* non-critical */ }
   } catch (e: any) {
     journal.logAction("ERROR", "getFundingRates: " + e.message);
   }

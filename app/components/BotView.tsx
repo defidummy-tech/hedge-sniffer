@@ -16,6 +16,8 @@ var DEFAULT_CONFIG: BotConfig = {
   stopLossPct: 5,
   maxHoldHours: 168,
   fundingLockMinutes: 10,
+  slCooldownHours: 24,
+  takeProfitPct: 0,
   spotHedge: false,
   spotHedgeRatio: 1.0,
   paperTrading: false,
@@ -371,6 +373,8 @@ export default function BotView() {
             <ConfigSlider label="Leverage" value={config.leverage} onChange={function(v) { upd("leverage", v); }} min={1} max={20} step={1} unit="x" color={C.p} tip="Default leverage for new positions" />
             <ConfigSlider label="Max Positions" value={config.maxPositions} onChange={function(v) { upd("maxPositions", v); }} min={1} max={10} step={1} unit="" color={C.a} tip="Max concurrent open positions" />
             <ConfigSlider label="Stop Loss" value={config.stopLossPct} onChange={function(v) { upd("stopLossPct", v); }} min={1} max={25} step={0.5} unit="%" color={C.r} tip="Close if unrealized loss exceeds this %" />
+            <ConfigSlider label="Take Profit" value={config.takeProfitPct} onChange={function(v) { upd("takeProfitPct", v); }} min={0} max={50} step={0.5} unit="%" color={C.g} tip="Close when profit exceeds this % of position size (0 = off)" />
+            <ConfigSlider label="SL Cooldown" value={config.slCooldownHours} onChange={function(v) { upd("slCooldownHours", v); }} min={0} max={168} step={1} unit="h" color={C.r} tip="Hours to wait before re-entering a coin after stop-loss (0 = off)" />
             <ConfigSlider label="Max Hold Time" value={config.maxHoldHours} onChange={function(v) { upd("maxHoldHours", v); }} min={1} max={720} step={1} unit="h" color={C.y} tip="Force close after this many hours" />
             <ConfigSlider label="Funding Lock" value={config.fundingLockMinutes} onChange={function(v) { upd("fundingLockMinutes", v); }} min={0} max={55} step={5} unit="min" color={C.p} tip="Hold position this many minutes before funding settlement (0 = off)" />
             {config.paperTrading && (
@@ -459,6 +463,12 @@ export default function BotView() {
               )}
               <div>{"\u2198"} <strong>Exit:</strong> Close when funding APR &lt; <span style={{ color: C.g, fontWeight: 600 }}>{(config.exitAPR * 100).toFixed(0)}%</span></div>
               <div>{"\u26D4"} <strong>Stop Loss:</strong> Close if unrealized loss &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.stopLossPct}%</span></div>
+              {config.takeProfitPct > 0 && (
+                <div>{"\uD83C\uDFAF"} <strong>Take Profit:</strong> Close when profit &gt; <span style={{ color: C.g, fontWeight: 600 }}>{config.takeProfitPct}%</span></div>
+              )}
+              {config.slCooldownHours > 0 && (
+                <div>{"\u23F1"} <strong>SL Cooldown:</strong> Wait <span style={{ color: C.r, fontWeight: 600 }}>{config.slCooldownHours}h</span> before re-entering after stop-loss</div>
+              )}
               <div>{"\u23F0"} <strong>Max Hold:</strong> Force close after <span style={{ color: C.y, fontWeight: 600 }}>{config.maxHoldHours}h</span></div>
               <div>{"\uD83D\uDCB0"} <strong>Size:</strong> Up to <span style={{ color: C.a, fontWeight: 600 }}>${config.maxPositionUSD}</span> at <span style={{ color: C.p, fontWeight: 600 }}>{config.leverage}x</span> leverage</div>
               <div>{"\uD83D\uDCCA"} <strong>Max Positions:</strong> <span style={{ color: C.a, fontWeight: 600 }}>{config.maxPositions}</span> concurrent</div>

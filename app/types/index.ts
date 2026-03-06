@@ -257,6 +257,8 @@ export interface BotConfig {
   stopLossPct: number;
   maxHoldHours: number;
   fundingLockMinutes: number;
+  slCooldownHours: number;    // Hours to wait before re-entering a coin after stop-loss
+  takeProfitPct: number;      // Close when profit exceeds this % (0 = disabled)
   spotHedge: boolean;
   spotHedgeRatio: number;
   paperTrading: boolean;

@@ -102,6 +102,8 @@ function defaultConfig(): BotConfig {
     stopLossPct: parseFloat(process.env.BOT_STOP_LOSS || "5"),
     maxHoldHours: parseFloat(process.env.BOT_MAX_HOLD_HOURS || "168"),
     fundingLockMinutes: parseFloat(process.env.BOT_FUNDING_LOCK_MINUTES || "10"),
+    slCooldownHours: parseFloat(process.env.BOT_SL_COOLDOWN_HOURS || "24"),
+    takeProfitPct: parseFloat(process.env.BOT_TAKE_PROFIT_PCT || "0"),
     spotHedge: parseBool(process.env.BOT_SPOT_HEDGE, false),
     spotHedgeRatio: parseFloat(process.env.BOT_SPOT_HEDGE_RATIO || "1"),
     paperTrading: parseBool(process.env.BOT_PAPER_TRADING, false),

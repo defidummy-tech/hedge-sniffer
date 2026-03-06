@@ -2,7 +2,7 @@
 
 import type { Asset, Bet, PricePoint, OddsPoint, FundingPoint } from "../types";
 import { SEED, initAssets, genPriceHistory, genOddsHistory, genFundingHistory } from "./dataProvider";
-import { PRIORITY_MAPPINGS, VENTUAL_COINS, buildAssetList, extractThreshold } from "./marketMapping";
+import { PRIORITY_MAPPINGS, buildAssetList, extractThreshold } from "./marketMapping";
 import type { MarketMapping } from "./marketMapping";
 
 // ── Hyperliquid fetchers ──
@@ -44,72 +44,66 @@ async function fetchHLMeta(): Promise<HLMeta> {
   return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
 }
 
-/** Fetch Ventuals/pre-launch token data (separate from regular perps) */
-async function fetchVentualsData(coins: string[]): Promise<HLMeta> {
-  var names: string[] = [];
-  var prices: Record<string, number> = {};
-  var funding: Record<string, number> = {};
-  var openInterest: Record<string, number> = {};
-  var dayVolume: Record<string, number> = {};
-  var premium: Record<string, number> = {};
+/** Discover all builder dexes and fetch their asset data */
+async function fetchBuilderDexMeta(): Promise<{
+  meta: HLMeta;
+  assets: Array<{ coin: string; dex: string; funding: number; volume: number }>;
+}> {
+  var meta: HLMeta = { names: [], prices: {}, funding: {}, openInterest: {}, dayVolume: {}, premium: {} };
+  var assets: Array<{ coin: string; dex: string; funding: number; volume: number }> = [];
 
-  var results = await Promise.allSettled(coins.map(async function(coin) {
-    // sym is the part after "vntl:" — e.g. "OPENAI"
-    var sym = coin.replace("vntl:", "");
-
-    // Get price from L2 book (midprice of best bid/ask)
-    var priceRes = await fetch("/api/hyperliquid", {
+  try {
+    var dexRes = await fetch("/api/hyperliquid", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "l2Book", coin: coin }),
+      body: JSON.stringify({ type: "perpDexs" }),
     });
-    var midPrice = 0;
-    if (priceRes.ok) {
-      var book = await priceRes.json();
-      if (book && book.levels && book.levels.length >= 2) {
-        var bids = book.levels[0];
-        var asks = book.levels[1];
-        if (bids && bids.length > 0 && asks && asks.length > 0) {
-          midPrice = (parseFloat(bids[0].px) + parseFloat(asks[0].px)) / 2;
-        }
-      }
-    }
+    if (!dexRes.ok) return { meta: meta, assets: assets };
+    var dexes: Array<{ name: string }> = await dexRes.json();
+    if (!Array.isArray(dexes) || dexes.length === 0) return { meta: meta, assets: assets };
 
-    // Get funding from last hour's history
-    var startTime = Date.now() - 3600000;
-    var fundRes = await fetch("/api/hyperliquid", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "fundingHistory", coin: coin, startTime: startTime }),
-    });
-    var fundingRate = 0;
-    var prem = 0;
-    if (fundRes.ok) {
-      var fData = await fundRes.json();
-      if (Array.isArray(fData) && fData.length > 0) {
-        var last = fData[fData.length - 1];
-        fundingRate = parseFloat(last.fundingRate || "0");
-        prem = parseFloat(last.premium || "0");
-      }
-    }
+    var dexResults = await Promise.allSettled(
+      dexes.map(async function(dex) {
+        var res = await fetch("/api/hyperliquid", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "metaAndAssetCtxs", dex: dex.name }),
+        });
+        if (!res.ok) throw new Error("dex " + dex.name + " meta " + res.status);
+        var data = await res.json();
+        return { dexName: dex.name, meta: data[0], ctxs: data[1] };
+      })
+    );
 
-    return { sym: sym, midPrice: midPrice, fundingRate: fundingRate, premium: prem };
-  }));
+    for (var dr of dexResults) {
+      if (dr.status !== "fulfilled") continue;
+      var dexData = dr.value;
+      if (!dexData.meta || !dexData.meta.universe) continue;
 
-  for (var i = 0; i < results.length; i++) {
-    var r = results[i];
-    if (r.status === "fulfilled" && r.value.midPrice > 0) {
-      var d = r.value;
-      names.push(d.sym);
-      prices[d.sym] = d.midPrice;
-      funding[d.sym] = d.fundingRate;
-      premium[d.sym] = d.premium;
-      openInterest[d.sym] = 0; // Not available from these endpoints
-      dayVolume[d.sym] = 0;
+      dexData.meta.universe.forEach(function(u: any, i: number) {
+        var ctx = dexData.ctxs[i];
+        if (!ctx) return;
+        var fullCoin = dexData.dexName + ":" + u.name;
+        var price = parseFloat(ctx.markPx || "0");
+        var fundRate = parseFloat(ctx.funding || "0");
+        var vol = parseFloat(ctx.dayNtlVlm || "0");
+        if (price <= 0) return;
+
+        meta.names.push(fullCoin);
+        meta.prices[fullCoin] = price;
+        meta.funding[fullCoin] = fundRate;
+        meta.openInterest[fullCoin] = parseFloat(ctx.openInterest || "0");
+        meta.dayVolume[fullCoin] = vol;
+        meta.premium[fullCoin] = parseFloat(ctx.premium || "0");
+
+        assets.push({ coin: fullCoin, dex: dexData.dexName, funding: fundRate, volume: vol });
+      });
     }
+  } catch (e) {
+    console.warn("Builder dex discovery failed:", e);
   }
 
-  return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
+  return { meta: meta, assets: assets };
 }
 
 async function fetchHLCandles(coin: string): Promise<PricePoint[]> {
@@ -245,27 +239,29 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     console.warn("Hyperliquid meta failed, using SEED:", e);
   }
 
-  // Step 2: Fetch Ventuals/pre-launch tokens (separate API path with vntl: prefix)
+  // Step 2: Discover and fetch builder-dex assets (xyz:HYUNDAI, vntl:OPENAI, etc.)
+  var builderDexAssets: Array<{ coin: string; dex: string; funding: number; volume: number }> = [];
   try {
-    var vntlData = await fetchVentualsData(VENTUAL_COINS);
-    // Merge Ventuals data into hlMeta (keyed by sym like "OPENAI", not "vntl:OPENAI")
-    for (var vi = 0; vi < vntlData.names.length; vi++) {
-      var vName = vntlData.names[vi];
-      if (!hlMeta.names.includes(vName)) hlMeta.names.push(vName);
-      hlMeta.prices[vName] = vntlData.prices[vName];
-      hlMeta.funding[vName] = vntlData.funding[vName];
-      hlMeta.openInterest[vName] = vntlData.openInterest[vName];
-      hlMeta.dayVolume[vName] = vntlData.dayVolume[vName];
-      hlMeta.premium[vName] = vntlData.premium[vName];
+    var bdResult = await fetchBuilderDexMeta();
+    builderDexAssets = bdResult.assets;
+    // Merge builder-dex data into hlMeta
+    for (var bi = 0; bi < bdResult.meta.names.length; bi++) {
+      var bName = bdResult.meta.names[bi];
+      if (!hlMeta.names.includes(bName)) hlMeta.names.push(bName);
+      hlMeta.prices[bName] = bdResult.meta.prices[bName];
+      hlMeta.funding[bName] = bdResult.meta.funding[bName];
+      hlMeta.openInterest[bName] = bdResult.meta.openInterest[bName];
+      hlMeta.dayVolume[bName] = bdResult.meta.dayVolume[bName];
+      hlMeta.premium[bName] = bdResult.meta.premium[bName];
     }
   } catch (e) {
-    console.warn("Ventuals data fetch failed:", e);
+    console.warn("Builder dex discovery failed:", e);
   }
 
-  // Step 3: Build dynamic asset list (priority + discovered high-funding/volume perps)
+  // Step 3: Build dynamic asset list (priority + discovered high-funding/volume perps + builder dex)
   var mappings: MarketMapping[];
   if (hlMeta.names.length > 0) {
-    mappings = buildAssetList(hlMeta.names, hlMeta.funding, hlMeta.dayVolume, hlMeta.openInterest);
+    mappings = buildAssetList(hlMeta.names, hlMeta.funding, hlMeta.dayVolume, hlMeta.openInterest, builderDexAssets);
   } else {
     mappings = PRIORITY_MAPPINGS;
   }
@@ -287,7 +283,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     // Fetch candle history
     var priceHistory: PricePoint[];
     var priceIsLive = false;
-    if (mapping.hasPerp && (hlMeta.prices[mapping.sym] || mapping.isVentual)) {
+    if (mapping.hasPerp && (hlMeta.prices[mapping.sym])) {
       try {
         priceHistory = await fetchHLCandles(hlCoin);
         priceIsLive = true;
@@ -300,7 +296,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
 
     // Fetch funding history
     var fundingHistory: FundingPoint[] = [];
-    if (mapping.hasPerp && (hlMeta.prices[mapping.sym] || mapping.isVentual)) {
+    if (mapping.hasPerp && hlMeta.prices[mapping.sym]) {
       try {
         fundingHistory = await fetchHLFundingHistory(hlCoin);
       } catch {
@@ -328,15 +324,15 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       var historyResults = await Promise.allSettled(
         rawBets.map(function(b: any) { return fetchPMOddsHistory(b._tokenId); })
       );
-      for (var bi = 0; bi < rawBets.length; bi++) {
-        var hr = historyResults[bi];
+      for (var beti = 0; beti < rawBets.length; beti++) {
+        var hr = historyResults[beti];
         if (hr.status === "fulfilled" && hr.value.length > 0) {
-          rawBets[bi].oddsHistory = hr.value;
+          rawBets[beti].oddsHistory = hr.value;
         } else {
-          rawBets[bi].oddsHistory = genOddsHistory(rawBets[bi].od, rawBets[bi].v);
+          rawBets[beti].oddsHistory = genOddsHistory(rawBets[beti].od, rawBets[beti].v);
         }
-        delete rawBets[bi]._tokenId;
-        bets.push(rawBets[bi]);
+        delete rawBets[beti]._tokenId;
+        bets.push(rawBets[beti]);
       }
       if (bets.length > 0) betsAreLive = true;
     } catch {
@@ -367,6 +363,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       dayNtlVlm: vol,
       premium: prem,
       hasPerp: mapping.hasPerp,
+      coin: mapping.coin,
     } as Asset;
   });
 
