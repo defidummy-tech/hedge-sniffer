@@ -259,6 +259,10 @@ export interface BotConfig {
   fundingLockMinutes: number;
   slCooldownHours: number;    // Hours to wait before re-entering a coin after stop-loss
   takeProfitPct: number;      // Close when profit exceeds this % (0 = disabled)
+  minVolume: number;          // Min 24h volume in USD to enter (0 = off)
+  minOI: number;              // Min open interest in USD to enter (0 = off)
+  maxDropPct: number;         // Skip entry if price dropped > this % in last 4h (0 = off)
+  maxOIPct: number;           // Max position as % of token OI (0 = off)
   spotHedge: boolean;
   spotHedgeRatio: number;
   paperTrading: boolean;

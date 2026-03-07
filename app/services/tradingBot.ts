@@ -107,11 +107,11 @@ async function hlInfoPost(body: any): Promise<any> {
 // ── Discover all builder dexes and return their universe+funding ──
 async function fetchBuilderDexOpportunities(): Promise<Array<{
   coin: string; dex: string; fundingRate: number; fundingAPR: number;
-  midPrice: number; maxLev: number; szDecimals: number;
+  midPrice: number; maxLev: number; szDecimals: number; volume: number; openInterest: number;
 }>> {
   var results: Array<{
     coin: string; dex: string; fundingRate: number; fundingAPR: number;
-    midPrice: number; maxLev: number; szDecimals: number;
+    midPrice: number; maxLev: number; szDecimals: number; volume: number; openInterest: number;
   }> = [];
 
   try {
@@ -145,6 +145,8 @@ async function fetchBuilderDexOpportunities(): Promise<Array<{
           midPrice: mid,
           maxLev: u.maxLeverage || 3,
           szDecimals: u.szDecimals || 0,
+          volume: parseFloat(ctx.dayNtlVlm || "0"),
+          openInterest: parseFloat(ctx.openInterest || "0"),
         });
       });
     }
@@ -215,6 +217,41 @@ async function isInSLCooldown(coin: string, cooldownHours: number): Promise<bool
     }
   }
   return false;
+}
+
+// ── Check recent price drop (last 4h) using Hyperliquid candle API ──
+async function getRecentPriceDrop(coin: string, currentPrice: number): Promise<number> {
+  try {
+    // Fetch 4h candles for the last 4 hours
+    var now = Date.now();
+    var fourHoursAgo = now - 4 * 3600000;
+    var candleData = await hlInfoPost({
+      type: "candleSnapshot",
+      req: {
+        coin: coin,
+        interval: "1h",
+        startTime: fourHoursAgo,
+        endTime: now,
+      },
+    });
+
+    if (!Array.isArray(candleData) || candleData.length === 0) return 0;
+
+    // Find the highest price in the 4h window
+    var highPrice = 0;
+    for (var c of candleData) {
+      var h = parseFloat(c.h || "0");
+      if (h > highPrice) highPrice = h;
+    }
+
+    if (highPrice <= 0) return 0;
+
+    // Calculate % drop from high to current
+    var dropPct = ((highPrice - currentPrice) / highPrice) * 100;
+    return Math.max(0, dropPct); // Only return positive drops
+  } catch (e) {
+    return 0; // If candle fetch fails, return 0 (no drop detected)
+  }
 }
 
 // ── Round a number to N significant figures (Hyperliquid requires ≤5 sig figs for prices) ──
@@ -872,6 +909,8 @@ async function scanForOpportunities(
     midPrice: number;
     maxLev: number;
     szDecimals: number;
+    volume: number;
+    openInterest: number;
   }> = [];
 
   meta.universe.forEach(function(u, i) {
@@ -892,6 +931,8 @@ async function scanForOpportunities(
         midPrice: mid,
         maxLev: u.maxLeverage,
         szDecimals: u.szDecimals,
+        volume: parseFloat(ctx.dayNtlVlm || "0"),
+        openInterest: parseFloat(ctx.openInterest || "0"),
       });
     }
   });
@@ -912,6 +953,8 @@ async function scanForOpportunities(
           midPrice: ba.midPrice,
           maxLev: ba.maxLev,
           szDecimals: ba.szDecimals,
+          volume: ba.volume,
+          openInterest: ba.openInterest,
         });
       }
     }
@@ -940,9 +983,50 @@ async function scanForOpportunities(
       continue;
     }
 
-    // Calculate position size
+    // ── Safety filters ──
+
+    // Min 24h volume filter
+    if (config.minVolume > 0 && opp.volume < config.minVolume) {
+      result.skipped.push(opp.coin + ":low_volume($" + Math.round(opp.volume) + ")");
+      journal.logAction("FILTER", opp.coin + " skipped — 24h volume $" + Math.round(opp.volume) + " < min $" + config.minVolume);
+      continue;
+    }
+
+    // Min open interest filter
+    if (config.minOI > 0 && opp.openInterest < config.minOI) {
+      result.skipped.push(opp.coin + ":low_oi($" + Math.round(opp.openInterest) + ")");
+      journal.logAction("FILTER", opp.coin + " skipped — OI $" + Math.round(opp.openInterest) + " < min $" + config.minOI);
+      continue;
+    }
+
+    // Price momentum filter: skip if price dropped > maxDropPct in last 4h
+    if (config.maxDropPct > 0) {
+      try {
+        var dropPct = await getRecentPriceDrop(opp.coin, opp.midPrice);
+        if (dropPct > config.maxDropPct) {
+          result.skipped.push(opp.coin + ":price_drop(" + dropPct.toFixed(1) + "%)");
+          journal.logAction("FILTER", opp.coin + " skipped — price dropped " + dropPct.toFixed(1) + "% in 4h (max " + config.maxDropPct + "%)");
+          continue;
+        }
+      } catch (e: any) {
+        // Non-critical: if candle fetch fails, allow entry
+      }
+    }
+
+    // Calculate position size (with dynamic OI-based cap)
     var lev = Math.min(config.leverage, opp.maxLev);
-    var notional = config.maxPositionUSD * lev;
+    var positionUSD = config.maxPositionUSD;
+
+    // Cap position size as % of token OI
+    if (config.maxOIPct > 0 && opp.openInterest > 0) {
+      var maxFromOI = (opp.openInterest * config.maxOIPct) / 100;
+      if (maxFromOI < positionUSD) {
+        journal.logAction("SIZE", opp.coin + " position capped $" + positionUSD + " → $" + maxFromOI.toFixed(0) + " (" + config.maxOIPct + "% of OI $" + Math.round(opp.openInterest) + ")");
+        positionUSD = maxFromOI;
+      }
+    }
+
+    var notional = positionUSD * lev;
     var rawSize = notional / opp.midPrice;
     var size = parseFloat(rawSize.toFixed(opp.szDecimals));
 
@@ -964,7 +1048,7 @@ async function scanForOpportunities(
           id: genId(),
           coin: opp.coin,
           direction: opp.direction,
-          sizeUSD: config.maxPositionUSD,
+          sizeUSD: positionUSD,
           leverage: lev,
           entryPrice: fillPrice,
           entryTime: Date.now(),
@@ -987,11 +1071,11 @@ async function scanForOpportunities(
 
         await journal.addTrade(paperTrade);
         journal.logAction("OPEN", "[PAPER] " + opp.coin + " " + opp.direction.toUpperCase() +
-          " $" + config.maxPositionUSD + " @ $" + fmtPx(fillPrice) +
+          " $" + positionUSD + " @ $" + fmtPx(fillPrice) +
           " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + fmtPx(simStopPrice) + ")");
 
         sendAlert("\uD83D\uDCDD", "[PAPER] OPEN " + opp.coin + " " + opp.direction.toUpperCase(), [
-          "Size: $" + config.maxPositionUSD + " @ " + lev + "x",
+          "Size: $" + positionUSD + " @ " + lev + "x",
           "Price: $" + fmtPx(fillPrice),
           "APR: " + (opp.fundingAPR * 100).toFixed(0) + "%",
           "Stop-Loss: $" + fmtPx(simStopPrice),
@@ -1055,14 +1139,14 @@ async function scanForOpportunities(
           journal.logAction("REJECT", opp.coin + " " + opp.direction.toUpperCase() + " order rejected: " + rejectMsg);
           sendAlert("\u26A0\uFE0F", "REJECTED " + opp.coin + " " + opp.direction.toUpperCase(), [
             "Reason: " + rejectMsg,
-            "Size: $" + config.maxPositionUSD + " @ " + lev + "x",
+            "Size: $" + positionUSD + " @ " + lev + "x",
           ]).catch(function() {});
           result.errors.push(opp.coin + ": " + rejectMsg);
           continue; // Skip — no position opened, don't record trade
         }
 
         journal.logAction("OPEN", opp.coin + " " + opp.direction.toUpperCase() +
-          " $" + config.maxPositionUSD + " @ $" + fmtPx(fillPrice) +
+          " $" + positionUSD + " @ $" + fmtPx(fillPrice) +
           " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, filled " + fillSize + ")");
 
         // Record trade
@@ -1070,7 +1154,7 @@ async function scanForOpportunities(
           id: genId(),
           coin: opp.coin,
           direction: opp.direction,
-          sizeUSD: config.maxPositionUSD,
+          sizeUSD: positionUSD,
           leverage: lev,
           entryPrice: fillPrice,
           entryTime: Date.now(),
@@ -1146,7 +1230,7 @@ async function scanForOpportunities(
         // Telegram alert for new trade
         var balInfo = await getAccountStatus();
         sendAlert("\uD83D\uDFE2", "OPEN " + opp.coin + " " + opp.direction.toUpperCase(), [
-          "Size: $" + config.maxPositionUSD + " @ " + lev + "x",
+          "Size: $" + positionUSD + " @ " + lev + "x",
           "Price: $" + fmtPx(fillPrice),
           "APR: " + (opp.fundingAPR * 100).toFixed(0) + "%",
           "Balance: $" + balInfo.balance.toFixed(2),

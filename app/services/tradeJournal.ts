@@ -89,10 +89,13 @@ async function doInit(): Promise<void> {
   }
 }
 
-// ── Default config from env vars ──
+// ── Default config ──
+// SAFETY: enabled always defaults to false. The bot can only be enabled
+// through the UI (saved to Redis), never through env vars alone.
+// This prevents the bot from auto-enabling on cold boot if Redis fails.
 function defaultConfig(): BotConfig {
   return {
-    enabled: parseBool(process.env.BOT_ENABLED, false),
+    enabled: false, // ALWAYS false by default — must be enabled via UI
     testnet: parseBool(process.env.BOT_TESTNET, true),
     entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "10"),
     exitAPR: parseFloat(process.env.BOT_EXIT_APR || "1"),
@@ -104,6 +107,10 @@ function defaultConfig(): BotConfig {
     fundingLockMinutes: parseFloat(process.env.BOT_FUNDING_LOCK_MINUTES || "10"),
     slCooldownHours: parseFloat(process.env.BOT_SL_COOLDOWN_HOURS || "24"),
     takeProfitPct: parseFloat(process.env.BOT_TAKE_PROFIT_PCT || "0"),
+    minVolume: parseFloat(process.env.BOT_MIN_VOLUME || "0"),
+    minOI: parseFloat(process.env.BOT_MIN_OI || "0"),
+    maxDropPct: parseFloat(process.env.BOT_MAX_DROP_PCT || "0"),
+    maxOIPct: parseFloat(process.env.BOT_MAX_OI_PCT || "0"),
     spotHedge: parseBool(process.env.BOT_SPOT_HEDGE, false),
     spotHedgeRatio: parseFloat(process.env.BOT_SPOT_HEDGE_RATIO || "1"),
     paperTrading: parseBool(process.env.BOT_PAPER_TRADING, false),
@@ -150,10 +157,42 @@ var actions: Array<{ time: number; action: string; detail: string }> = [];
 
 // ── Config ──
 
+/** Merge saved config with defaults so new fields always get proper values */
+function mergeWithDefaults(saved: any): BotConfig {
+  var defaults = defaultConfig();
+  var merged: any = {};
+  for (var k in defaults) {
+    if (saved && saved[k] !== undefined && saved[k] !== null) {
+      merged[k] = saved[k];
+    } else {
+      merged[k] = (defaults as any)[k];
+    }
+  }
+  return merged as BotConfig;
+}
+
 export async function getConfig(): Promise<BotConfig> {
   await ensureInit();
+
+  // 1. Try local disk first (fast)
   var diskConfig = loadJSON(CONFIG_FILE);
-  if (diskConfig) return diskConfig as BotConfig;
+  if (diskConfig) return mergeWithDefaults(diskConfig);
+
+  // 2. Disk missing (cold boot) — try Redis directly
+  if (USE_REDIS) {
+    try {
+      var redisConfig = await redisGet("hedge:config");
+      if (redisConfig) {
+        saveJSON(CONFIG_FILE, redisConfig); // cache locally
+        console.log("[journal] Config recovered from Redis on getConfig()");
+        return mergeWithDefaults(redisConfig);
+      }
+    } catch (e) {
+      console.error("[journal] Redis config fetch failed in getConfig():", e);
+    }
+  }
+
+  // 3. Both failed — use defaults (bot starts disabled by default)
   return defaultConfig();
 }
 
@@ -161,9 +200,8 @@ export async function updateConfig(partial: Partial<BotConfig>): Promise<BotConf
   await ensureInit();
   var current = await getConfig();
   for (var k in partial) {
-    if (k in current) {
-      (current as any)[k] = (partial as any)[k];
-    }
+    // Accept any key that exists in defaults (handles new fields)
+    (current as any)[k] = (partial as any)[k];
   }
   saveAndSync(CONFIG_FILE, "hedge:config", current);
   return { ...current };

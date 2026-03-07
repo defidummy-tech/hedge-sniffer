@@ -18,6 +18,10 @@ var DEFAULT_CONFIG: BotConfig = {
   fundingLockMinutes: 10,
   slCooldownHours: 24,
   takeProfitPct: 0,
+  minVolume: 0,
+  minOI: 0,
+  maxDropPct: 0,
+  maxOIPct: 0,
   spotHedge: false,
   spotHedgeRatio: 1.0,
   paperTrading: false,
@@ -142,6 +146,8 @@ export default function BotView() {
   var [walletAddress, setWalletAddress] = useState<string>("");
   var [accountError, setAccountError] = useState<string>("");
   var [fundingRates, setFundingRates] = useState<Record<string, number>>({});
+  var [optimizing, setOptimizing] = useState(false);
+  var [optResult, setOptResult] = useState<any>(null);
 
   // Fetch bot status
   var fetchStatus = useCallback(async function() {
@@ -220,6 +226,40 @@ export default function BotView() {
       setKilling(false);
     }
   }, [fetchStatus]);
+
+  // Run optimizer
+  var runOptimize = useCallback(async function() {
+    setOptimizing(true);
+    setOptResult(null);
+    try {
+      var res = await fetch("/api/bot/optimize");
+      if (!res.ok) throw new Error("Optimize API " + res.status);
+      var json = await res.json();
+      if (json.ok) {
+        setOptResult(json);
+      } else {
+        setStatusMsg("Optimize failed: " + (json.error || "unknown"));
+      }
+    } catch (e: any) {
+      setStatusMsg("Optimize failed: " + (e.message || "unknown"));
+    } finally {
+      setOptimizing(false);
+    }
+  }, []);
+
+  // Apply recommended config from optimizer
+  var applyRecommended = useCallback(function() {
+    if (!optResult || !optResult.recommended) return;
+    var rec = optResult.recommended;
+    setConfig(function(c) {
+      var n: any = {};
+      for (var k in c) n[k] = (c as any)[k];
+      for (var k in rec) n[k] = rec[k];
+      return n;
+    });
+    setStatusMsg("Recommended params applied — click Save Config to persist");
+    setTimeout(function() { setStatusMsg(null); }, 5000);
+  }, [optResult]);
 
   // Update config field helper
   var upd = function(field: string, value: any) {
@@ -377,6 +417,51 @@ export default function BotView() {
             <ConfigSlider label="SL Cooldown" value={config.slCooldownHours} onChange={function(v) { upd("slCooldownHours", v); }} min={0} max={168} step={1} unit="h" color={C.r} tip="Hours to wait before re-entering a coin after stop-loss (0 = off)" />
             <ConfigSlider label="Max Hold Time" value={config.maxHoldHours} onChange={function(v) { upd("maxHoldHours", v); }} min={1} max={720} step={1} unit="h" color={C.y} tip="Force close after this many hours" />
             <ConfigSlider label="Funding Lock" value={config.fundingLockMinutes} onChange={function(v) { upd("fundingLockMinutes", v); }} min={0} max={55} step={5} unit="min" color={C.p} tip="Hold position this many minutes before funding settlement (0 = off)" />
+
+            {/* Safety Filters */}
+            <div style={{ fontSize: 10, color: C.txD, textTransform: "uppercase", fontWeight: 600, marginTop: 8, marginBottom: 6, borderTop: "1px solid " + C.b + "40", paddingTop: 8 }}>{"\uD83D\uDEE1"} Safety Filters</div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.txM, fontFamily: "monospace", marginBottom: 2 }}>
+                <span style={{ textTransform: "uppercase", fontWeight: 600 }}>Min 24h Volume</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ color: C.o, fontFamily: "monospace", fontWeight: 700, fontSize: 12 }}>$</span>
+                <input
+                  type="number" min={0} max={10000000} step={1000}
+                  value={config.minVolume}
+                  onChange={function(e) { var v = parseFloat(e.target.value); if (v >= 0) upd("minVolume", v); }}
+                  style={{
+                    flex: 1, padding: "6px 8px", borderRadius: 6, fontSize: 12,
+                    fontFamily: "monospace", fontWeight: 700, color: C.o,
+                    background: C.sL, border: "1px solid " + C.b,
+                    outline: "none",
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 8, color: C.txD }}>Skip tokens with less than this 24h volume (0 = off)</div>
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.txM, fontFamily: "monospace", marginBottom: 2 }}>
+                <span style={{ textTransform: "uppercase", fontWeight: 600 }}>Min Open Interest</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ color: C.o, fontFamily: "monospace", fontWeight: 700, fontSize: 12 }}>$</span>
+                <input
+                  type="number" min={0} max={10000000} step={1000}
+                  value={config.minOI}
+                  onChange={function(e) { var v = parseFloat(e.target.value); if (v >= 0) upd("minOI", v); }}
+                  style={{
+                    flex: 1, padding: "6px 8px", borderRadius: 6, fontSize: 12,
+                    fontFamily: "monospace", fontWeight: 700, color: C.o,
+                    background: C.sL, border: "1px solid " + C.b,
+                    outline: "none",
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 8, color: C.txD }}>Skip tokens with less than this open interest (0 = off)</div>
+            </div>
+            <ConfigSlider label="Max Price Drop" value={config.maxDropPct} onChange={function(v) { upd("maxDropPct", v); }} min={0} max={30} step={1} unit="%" color={C.r} tip="Skip entry if price dropped more than this % in last 4h (0 = off)" />
+            <ConfigSlider label="Max OI %" value={config.maxOIPct} onChange={function(v) { upd("maxOIPct", v); }} min={0} max={10} step={0.1} unit="%" color={C.y} tip="Cap position size as % of token OI — prevents outsized positions on illiquid tokens (0 = off)" />
             {config.paperTrading && (
               <ConfigSlider label="Paper Balance" value={config.paperBalance} onChange={function(v) { upd("paperBalance", v); }} min={100} max={100000} step={100} unit="$" color={C.y} tip="Simulated starting balance for paper trading" />
             )}
@@ -393,14 +478,22 @@ export default function BotView() {
               color: C.g, fontFamily: "monospace", fontSize: 12, fontWeight: 700,
               cursor: saving ? "wait" : "pointer",
             }}>
-              {saving ? "\u27F3" : "\u2714"} Save Config
+              {saving ? "\u27F3" : "\u2714"} Save
+            </button>
+            <button onClick={runOptimize} disabled={optimizing} style={{
+              flex: 1, padding: "12px 16px", borderRadius: 8, border: "1px solid " + C.p + "50",
+              background: "linear-gradient(135deg," + C.p + "15," + C.a + "10)",
+              color: C.p, fontFamily: "monospace", fontSize: 12, fontWeight: 700,
+              cursor: optimizing ? "wait" : "pointer",
+            }}>
+              {optimizing ? "\u27F3 Analyzing..." : "\u2728 Optimize"}
             </button>
             <button onClick={killAll} disabled={killing} style={{
               flex: 1, padding: "12px 16px", borderRadius: 8, border: "1px solid " + C.r + "50",
               background: "linear-gradient(135deg," + C.r + "15," + C.r + "08)",
               color: C.r, fontFamily: "monospace", fontSize: 12, fontWeight: 700, cursor: killing ? "wait" : "pointer",
             }}>
-              {killing ? "\u27F3 Closing..." : "\u26D4 Kill Switch"}
+              {killing ? "\u27F3 Closing..." : "\u26D4 Kill"}
             </button>
           </div>
 
@@ -472,8 +565,109 @@ export default function BotView() {
               <div>{"\u23F0"} <strong>Max Hold:</strong> Force close after <span style={{ color: C.y, fontWeight: 600 }}>{config.maxHoldHours}h</span></div>
               <div>{"\uD83D\uDCB0"} <strong>Size:</strong> Up to <span style={{ color: C.a, fontWeight: 600 }}>${config.maxPositionUSD}</span> at <span style={{ color: C.p, fontWeight: 600 }}>{config.leverage}x</span> leverage</div>
               <div>{"\uD83D\uDCCA"} <strong>Max Positions:</strong> <span style={{ color: C.a, fontWeight: 600 }}>{config.maxPositions}</span> concurrent</div>
+              {(config.minVolume > 0 || config.minOI > 0 || config.maxDropPct > 0 || config.maxOIPct > 0) && (
+                <div style={{ marginTop: 4, paddingTop: 4, borderTop: "1px solid " + C.b + "30" }}>
+                  <div style={{ fontSize: 10, color: C.txD, fontWeight: 600, marginBottom: 2 }}>{"\uD83D\uDEE1"} SAFETY FILTERS</div>
+                  {config.minVolume > 0 && (
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Min 24h volume: <span style={{ color: C.o, fontWeight: 600 }}>${config.minVolume.toLocaleString()}</span></div>
+                  )}
+                  {config.minOI > 0 && (
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Min open interest: <span style={{ color: C.o, fontWeight: 600 }}>${config.minOI.toLocaleString()}</span></div>
+                  )}
+                  {config.maxDropPct > 0 && (
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Skip if price dropped &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.maxDropPct}%</span> in 4h</div>
+                  )}
+                  {config.maxOIPct > 0 && (
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Cap position at <span style={{ color: C.y, fontWeight: 600 }}>{config.maxOIPct}%</span> of token OI</div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
+
+          {/* Optimization Results */}
+          {optResult && (
+            <div style={{ background: C.s, border: "1px solid " + C.p + "40", borderRadius: 10, padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 13, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600 }}>
+                  <span style={{ color: C.p }}>{"\u2728"} Optimization</span> Results
+                </div>
+                <button onClick={applyRecommended} style={{
+                  padding: "4px 12px", borderRadius: 5, border: "1px solid " + C.g + "50",
+                  background: C.g + "15", color: C.g, fontSize: 10, fontWeight: 700,
+                  fontFamily: "monospace", cursor: "pointer",
+                }}>
+                  Apply All
+                </button>
+              </div>
+
+              {/* Market Summary */}
+              <div style={{ fontSize: 10, color: C.txM, marginBottom: 10, lineHeight: 1.6 }}>
+                <div>Scanned <span style={{ color: C.a, fontWeight: 600 }}>{optResult.marketSummary?.totalPerps}</span> perps across all dexes</div>
+                <div>High quality opportunities: <span style={{ color: C.g, fontWeight: 600 }}>{optResult.marketSummary?.highQuality}</span> | Medium: <span style={{ color: C.y, fontWeight: 600 }}>{optResult.marketSummary?.medQuality}</span></div>
+                {optResult.tradeHistory?.total > 0 && (
+                  <div>History: <span style={{ color: C.txM }}>{optResult.tradeHistory.total} trades</span>, Win Rate: <span style={{ color: optResult.tradeHistory.winRate > 50 ? C.g : C.r, fontWeight: 600 }}>{optResult.tradeHistory.winRate}%</span>, P&L: <span style={{ color: optResult.tradeHistory.totalPnL >= 0 ? C.g : C.r, fontWeight: 600 }}>${optResult.tradeHistory.totalPnL}</span></div>
+                )}
+              </div>
+
+              {/* Recommended Changes */}
+              <div style={{ fontSize: 10, color: C.txD, textTransform: "uppercase", fontWeight: 600, marginBottom: 6 }}>Recommendations</div>
+              <div style={{ fontSize: 10, color: C.txM, lineHeight: 1.8 }}>
+                {(optResult.explanations || []).map(function(exp: string, i: number) {
+                  return <div key={i} style={{ paddingLeft: 8, borderLeft: "2px solid " + C.p + "30" }}>{exp}</div>;
+                })}
+              </div>
+
+              {/* Top Opportunities */}
+              {optResult.topOpportunities && optResult.topOpportunities.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 10, color: C.txD, textTransform: "uppercase", fontWeight: 600, marginBottom: 6 }}>Top Opportunities</div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9, fontFamily: "monospace" }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid " + C.b }}>
+                          {["Coin", "APR", "Dir", "Volume", "OI", "Score"].map(function(h) {
+                            return <th key={h} style={{ padding: "4px 5px", textAlign: "left", color: C.txD, fontWeight: 600, fontSize: 8, textTransform: "uppercase" }}>{h}</th>;
+                          })}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {optResult.topOpportunities.map(function(opp: any, i: number) {
+                          var scoreColor = opp.qualityScore >= 60 ? C.g : opp.qualityScore >= 40 ? C.y : C.r;
+                          return (
+                            <tr key={i} style={{ borderBottom: "1px solid " + C.b + "30" }}>
+                              <td style={{ padding: "4px 5px", color: C.a, fontWeight: 600 }}>{opp.coin}</td>
+                              <td style={{ padding: "4px 5px", color: C.o, fontWeight: 600 }}>{opp.fundingAPR}%</td>
+                              <td style={{ padding: "4px 5px" }}>
+                                <span style={{ fontSize: 8, padding: "1px 4px", borderRadius: 3, fontWeight: 700, background: (opp.direction === "long" ? C.g : C.r) + "18", color: opp.direction === "long" ? C.g : C.r }}>
+                                  {opp.direction.toUpperCase()}
+                                </span>
+                              </td>
+                              <td style={{ padding: "4px 5px", color: C.txM }}>${opp.volume > 1e6 ? (opp.volume / 1e6).toFixed(1) + "M" : (opp.volume / 1e3).toFixed(0) + "K"}</td>
+                              <td style={{ padding: "4px 5px", color: C.txM }}>${opp.openInterest > 1e6 ? (opp.openInterest / 1e6).toFixed(1) + "M" : (opp.openInterest / 1e3).toFixed(0) + "K"}</td>
+                              <td style={{ padding: "4px 5px", color: scoreColor, fontWeight: 700 }}>{opp.qualityScore}/100</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Problem Coins */}
+              {optResult.problemCoins && optResult.problemCoins.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 10, color: C.r, textTransform: "uppercase", fontWeight: 600, marginBottom: 4 }}>{"\u26A0"} Problem Coins</div>
+                  <div style={{ fontSize: 9, fontFamily: "monospace", color: C.txM, lineHeight: 1.6 }}>
+                    {optResult.problemCoins.map(function(pc: any, i: number) {
+                      return <div key={i}>{pc.coin}: <span style={{ color: C.r }}>${pc.totalPnL}</span> ({pc.trades} trades, {pc.stopLosses} SLs)</div>;
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Activity Log */}
           <div style={{ background: C.s, border: "1px solid " + C.b, borderRadius: 10, padding: 16 }}>
