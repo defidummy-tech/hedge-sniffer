@@ -199,13 +199,26 @@ export async function GET() {
     // Entry APR: if many high-quality tokens available, be selective. If few, lower bar.
     if (highQualityTokens.length > 5) {
       rec.entryAPR = 0.15; // 15%
-      explanations.push("Many high-quality opportunities available — recommended entry APR: 15%");
+      explanations.push("Many high-quality opportunities — entry APR: 15%");
     } else if (highQualityTokens.length > 0) {
       rec.entryAPR = 0.10; // 10%
-      explanations.push("Some high-quality opportunities — recommended entry APR: 10%");
+      explanations.push("Some high-quality opportunities — entry APR: 10%");
     } else {
       rec.entryAPR = 0.20; // 20% — be very selective with lower-quality tokens
-      explanations.push("Few quality opportunities — recommended entry APR: 20% (be selective)");
+      explanations.push("Few quality opportunities — entry APR: 20% (be selective)");
+    }
+
+    // Exit APR: typically 1/10th of entry — hold until funding drops significantly
+    rec.exitAPR = Math.max(0.01, rec.entryAPR / 10);
+    explanations.push("Exit APR: " + (rec.exitAPR * 100).toFixed(0) + "% — hold until funding drops significantly");
+
+    // Leverage: moderate leverage balances funding income vs liquidation risk
+    if (slRate > 0.3) {
+      rec.leverage = 2;
+      explanations.push("High SL rate — reducing leverage to 2x for safety");
+    } else {
+      rec.leverage = 3;
+      explanations.push("Leverage 3x — good balance of funding income vs risk");
     }
 
     // Min volume: use 25th percentile of current market

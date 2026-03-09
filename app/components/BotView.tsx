@@ -231,7 +231,7 @@ export default function BotView() {
     }
   }, [fetchStatus]);
 
-  // Run optimizer
+  // Run optimizer — auto-applies recommended params
   var runOptimize = useCallback(async function() {
     setOptimizing(true);
     setOptResult(null);
@@ -241,6 +241,20 @@ export default function BotView() {
       var json = await res.json();
       if (json.ok) {
         setOptResult(json);
+        // Auto-apply recommended params to config
+        if (json.recommended) {
+          var rec = json.recommended;
+          setConfig(function(c) {
+            var n: any = {};
+            for (var k in c) n[k] = (c as any)[k];
+            for (var k in rec) n[k] = rec[k];
+            return n;
+          });
+          // Count how many params changed
+          var changedCount = Object.keys(json.recommended).length;
+          setStatusMsg(changedCount + " params optimized — click Save to persist");
+          setTimeout(function() { setStatusMsg(null); }, 8000);
+        }
       } else {
         setStatusMsg("Optimize failed: " + (json.error || "unknown"));
       }
@@ -251,7 +265,7 @@ export default function BotView() {
     }
   }, []);
 
-  // Apply recommended config from optimizer
+  // Apply recommended config from optimizer (manual re-apply)
   var applyRecommended = useCallback(function() {
     if (!optResult || !optResult.recommended) return;
     var rec = optResult.recommended;
@@ -261,7 +275,7 @@ export default function BotView() {
       for (var k in rec) n[k] = rec[k];
       return n;
     });
-    setStatusMsg("Recommended params applied — click Save Config to persist");
+    setStatusMsg("Params re-applied — click Save to persist");
     setTimeout(function() { setStatusMsg(null); }, 5000);
   }, [optResult]);
 
@@ -626,7 +640,7 @@ export default function BotView() {
                   background: C.g + "15", color: C.g, fontSize: 10, fontWeight: 700,
                   fontFamily: "monospace", cursor: "pointer",
                 }}>
-                  Apply All
+                  Re-Apply
                 </button>
               </div>
 
