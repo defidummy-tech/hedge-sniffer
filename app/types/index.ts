@@ -244,6 +244,8 @@ export interface BotTrade {
   paper?: boolean;
   lastFundingCheck?: number;
   stopPrice?: number | null;
+  settlementsCaptured?: number;  // How many funding settlements captured so far
+  spotSizeUSD?: number;          // USD size of spot hedge (if active)
 }
 
 export interface BotConfig {
@@ -263,6 +265,10 @@ export interface BotConfig {
   minOI: number;              // Min open interest in USD to enter (0 = off)
   maxDropPct: number;         // Skip entry if price dropped > this % in last 4h (0 = off)
   maxOIPct: number;           // Max position as % of token OI (0 = off)
+  minHoldSettlements: number; // Hold through at least N funding settlements before exit (except SL)
+  reEntryCooldownHours: number; // Wait N hours before re-entering ANY coin after ANY exit
+  entryWindowMinutes: number; // Only enter within N minutes of funding settlement (0 = off)
+  minFundingPersistHours: number; // Require funding above entry threshold for N consecutive hours (0 = off)
   spotHedge: boolean;
   spotHedgeRatio: number;
   paperTrading: boolean;

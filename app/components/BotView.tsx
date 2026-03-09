@@ -22,6 +22,10 @@ var DEFAULT_CONFIG: BotConfig = {
   minOI: 0,
   maxDropPct: 0,
   maxOIPct: 0,
+  minHoldSettlements: 1,
+  reEntryCooldownHours: 2,
+  entryWindowMinutes: 30,
+  minFundingPersistHours: 2,
   spotHedge: false,
   spotHedgeRatio: 1.0,
   paperTrading: false,
@@ -418,6 +422,13 @@ export default function BotView() {
             <ConfigSlider label="Max Hold Time" value={config.maxHoldHours} onChange={function(v) { upd("maxHoldHours", v); }} min={1} max={720} step={1} unit="h" color={C.y} tip="Force close after this many hours" />
             <ConfigSlider label="Funding Lock" value={config.fundingLockMinutes} onChange={function(v) { upd("fundingLockMinutes", v); }} min={0} max={55} step={5} unit="min" color={C.p} tip="Hold position this many minutes before funding settlement (0 = off)" />
 
+            {/* Funding Strategy */}
+            <div style={{ fontSize: 10, color: C.txD, textTransform: "uppercase", fontWeight: 600, marginTop: 8, marginBottom: 6, borderTop: "1px solid " + C.b + "40", paddingTop: 8 }}>{"\uD83D\uDCC8"} Funding Strategy</div>
+            <ConfigSlider label="Min Hold Settlements" value={config.minHoldSettlements} onChange={function(v) { upd("minHoldSettlements", v); }} min={0} max={12} step={1} unit="" color={C.a} tip="Hold through at least N funding settlements before exit (except SL). 1 = hold 1 hour minimum." />
+            <ConfigSlider label="Re-Entry Cooldown" value={config.reEntryCooldownHours} onChange={function(v) { upd("reEntryCooldownHours", v); }} min={0} max={48} step={0.5} unit="h" color={C.o} tip="Wait N hours before re-entering ANY coin after ANY exit (prevents churn)" />
+            <ConfigSlider label="Entry Window" value={config.entryWindowMinutes} onChange={function(v) { upd("entryWindowMinutes", v); }} min={0} max={59} step={1} unit="min" color={C.p} tip="Only enter within N minutes of funding settlement at :00 UTC (0 = enter anytime)" />
+            <ConfigSlider label="Funding Persistence" value={config.minFundingPersistHours} onChange={function(v) { upd("minFundingPersistHours", v); }} min={0} max={24} step={1} unit="h" color={C.g} tip="Require funding above entry threshold for N consecutive hours before entering (0 = off)" />
+
             {/* Safety Filters */}
             <div style={{ fontSize: 10, color: C.txD, textTransform: "uppercase", fontWeight: 600, marginTop: 8, marginBottom: 6, borderTop: "1px solid " + C.b + "40", paddingTop: 8 }}>{"\uD83D\uDEE1"} Safety Filters</div>
             <div style={{ marginBottom: 10 }}>
@@ -554,13 +565,31 @@ export default function BotView() {
                   {"\u2022"} + Opposing <span style={{ color: C.p }}>spot</span> position for delta-neutral ({(config.spotHedgeRatio * 100).toFixed(0)}% ratio)
                 </div>
               )}
-              <div>{"\u2198"} <strong>Exit:</strong> Close when funding APR &lt; <span style={{ color: C.g, fontWeight: 600 }}>{(config.exitAPR * 100).toFixed(0)}%</span></div>
-              <div>{"\u26D4"} <strong>Stop Loss:</strong> Close if unrealized loss &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.stopLossPct}%</span></div>
+              {config.entryWindowMinutes > 0 && (
+                <div style={{ paddingLeft: 20 }}>
+                  {"\u2022"} Only enter within <span style={{ color: C.p, fontWeight: 600 }}>{config.entryWindowMinutes}min</span> of funding settlement (:00 UTC)
+                </div>
+              )}
+              {config.minFundingPersistHours > 0 && (
+                <div style={{ paddingLeft: 20 }}>
+                  {"\u2022"} Require funding above threshold for <span style={{ color: C.g, fontWeight: 600 }}>{config.minFundingPersistHours}h</span> consecutively
+                </div>
+              )}
+              <div>{"\u2198"} <strong>Exit:</strong> Close when funding APR &lt; <span style={{ color: C.g, fontWeight: 600 }}>{(config.exitAPR * 100).toFixed(0)}%</span> (after hold gate)</div>
+              {config.minHoldSettlements > 0 && (
+                <div style={{ paddingLeft: 20 }}>
+                  {"\u2022"} Hold through at least <span style={{ color: C.a, fontWeight: 600 }}>{config.minHoldSettlements}</span> funding settlement(s) before exiting
+                </div>
+              )}
+              <div>{"\u26D4"} <strong>Stop Loss:</strong> Close if unrealized loss &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.stopLossPct}%</span> (bypasses hold gate)</div>
               {config.takeProfitPct > 0 && (
-                <div>{"\uD83C\uDFAF"} <strong>Take Profit:</strong> Close when profit &gt; <span style={{ color: C.g, fontWeight: 600 }}>{config.takeProfitPct}%</span></div>
+                <div>{"\uD83C\uDFAF"} <strong>Take Profit:</strong> Close when profit &gt; <span style={{ color: C.g, fontWeight: 600 }}>{config.takeProfitPct}%</span> (bypasses hold gate)</div>
               )}
               {config.slCooldownHours > 0 && (
                 <div>{"\u23F1"} <strong>SL Cooldown:</strong> Wait <span style={{ color: C.r, fontWeight: 600 }}>{config.slCooldownHours}h</span> before re-entering after stop-loss</div>
+              )}
+              {config.reEntryCooldownHours > 0 && (
+                <div>{"\u23F1"} <strong>Re-Entry Cooldown:</strong> Wait <span style={{ color: C.o, fontWeight: 600 }}>{config.reEntryCooldownHours}h</span> before re-entering after ANY exit</div>
               )}
               <div>{"\u23F0"} <strong>Max Hold:</strong> Force close after <span style={{ color: C.y, fontWeight: 600 }}>{config.maxHoldHours}h</span></div>
               <div>{"\uD83D\uDCB0"} <strong>Size:</strong> Up to <span style={{ color: C.a, fontWeight: 600 }}>${config.maxPositionUSD}</span> at <span style={{ color: C.p, fontWeight: 600 }}>{config.leverage}x</span> leverage</div>

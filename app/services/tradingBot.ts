@@ -219,6 +219,65 @@ async function isInSLCooldown(coin: string, cooldownHours: number): Promise<bool
   return false;
 }
 
+// ── General re-entry cooldown: wait N hours after ANY exit on same coin ──
+async function isInReEntryCooldown(coin: string, cooldownHours: number): Promise<boolean> {
+  if (cooldownHours <= 0) return false;
+  var trades = await journal.getAllTrades();
+  var cooldownMs = cooldownHours * 3600000;
+  var now = Date.now();
+  for (var i = trades.length - 1; i >= 0; i--) {
+    var t = trades[i];
+    if (t.coin === coin && t.exitTime && t.status !== "open") {
+      if (now - t.exitTime < cooldownMs) return true;
+    }
+  }
+  return false;
+}
+
+// ── Check if funding has persisted above entry threshold for N consecutive hours ──
+// Uses Hyperliquid's fundingHistory API to look back N hours
+async function isFundingPersistent(coin: string, entryAPR: number, persistHours: number): Promise<boolean> {
+  if (persistHours <= 0) return true; // disabled
+  try {
+    var startTime = Date.now() - persistHours * 3600000;
+    // For builder-dex coins, strip the dex prefix for the API call
+    var apiCoin = coin;
+    var dexParam: string | undefined;
+    var colonIdx = coin.indexOf(":");
+    if (colonIdx !== -1) {
+      dexParam = coin.substring(0, colonIdx);
+      apiCoin = coin.substring(colonIdx + 1);
+    }
+    var body: any = { type: "fundingHistory", coin: apiCoin, startTime: startTime };
+    if (dexParam) body.dex = dexParam;
+    var history: Array<{ time: number; coin: string; fundingRate: string }> = await hlInfoPost(body);
+    if (!Array.isArray(history) || history.length === 0) return false;
+
+    // Check that ALL data points have |APR| >= entryAPR
+    var minAbsAPR = entryAPR; // e.g. 0.10 = 10%
+    for (var h of history) {
+      var hourlyRate = parseFloat(h.fundingRate);
+      var absAPR = Math.abs(hourlyRate * 8760);
+      if (absAPR < minAbsAPR) return false;
+    }
+    // Also need at least persistHours worth of data points (1 per hour)
+    return history.length >= persistHours;
+  } catch (e: any) {
+    // If API fails, don't block entry but log
+    journal.logAction("WARN", "Funding persistence check failed for " + coin + ": " + e.message);
+    return true; // fail-open: don't block on API errors
+  }
+}
+
+// ── Count how many hourly settlements have occurred since entry ──
+function countSettlementsSince(entryTime: number): number {
+  // Funding settles every hour at :00 UTC
+  // Count how many :00 boundaries have passed since entry
+  var entryHour = Math.ceil(entryTime / 3600000); // ms -> hour boundary (rounded up)
+  var nowHour = Math.floor(Date.now() / 3600000);  // ms -> hour boundary (rounded down)
+  return Math.max(0, nowHour - entryHour);
+}
+
 // ── Check recent price drop (last 4h) using Hyperliquid candle API ──
 async function getRecentPriceDrop(coin: string, currentPrice: number): Promise<number> {
   try {
@@ -251,6 +310,84 @@ async function getRecentPriceDrop(coin: string, currentPrice: number): Promise<n
     return Math.max(0, dropPct); // Only return positive drops
   } catch (e) {
     return 0; // If candle fetch fails, return 0 (no drop detected)
+  }
+}
+
+// ── Spot hedge helpers ──
+// Hyperliquid spot tokens use @{index} format where index = 10000 + asset index
+// The spot coin name is typically the same as perp name but with different routing
+
+async function getSpotMidPrice(hl: Hyperliquid, coin: string): Promise<number> {
+  try {
+    // Fetch spot meta to find the asset index
+    var spotMeta: any = await hlInfoPost({ type: "spotMeta" });
+    if (!spotMeta || !spotMeta.tokens) return 0;
+    var token = spotMeta.tokens.find(function(t: any) { return t.name === coin; });
+    if (!token) return 0;
+
+    var spotCtx: any = await hlInfoPost({ type: "spotMetaAndAssetCtxs" });
+    if (!spotCtx || !Array.isArray(spotCtx) || spotCtx.length < 2) return 0;
+    var spotAssets = spotCtx[0].tokens || [];
+    var spotCtxs = spotCtx[1] || [];
+
+    for (var i = 0; i < spotAssets.length; i++) {
+      if (spotAssets[i].name === coin && spotCtxs[i]) {
+        var mid = parseFloat(spotCtxs[i].midPx || "0");
+        if (mid > 0) return mid;
+      }
+    }
+    return 0;
+  } catch (e: any) {
+    return 0;
+  }
+}
+
+async function placeSpotHedge(hl: Hyperliquid, coin: string, sizeUSD: number, perpDirection: "long" | "short", isClose: boolean): Promise<{ price: number; filled: boolean }> {
+  // Spot hedge is opposite of perp direction:
+  // If perp is SHORT (earning funding), buy spot to delta-neutralize
+  // If perp is LONG (earning funding), sell spot (need to already hold it)
+  // On close: reverse the hedge
+  try {
+    var spotPrice = await getSpotMidPrice(hl, coin);
+    if (spotPrice <= 0) return { price: 0, filled: false };
+
+    var spotSize = sizeUSD / spotPrice;
+    // Opening hedge: buy spot if perp short, sell spot if perp long
+    // Closing hedge: sell spot if perp was short, buy spot if perp was long
+    var isBuySpot = perpDirection === "short" ? !isClose : isClose;
+
+    var limitPx = roundPx(isBuySpot ? spotPrice * 1.02 : spotPrice * 0.98); // 2% slippage buffer
+
+    // Find spot asset index
+    var spotMeta: any = await hlInfoPost({ type: "spotMeta" });
+    if (!spotMeta || !spotMeta.tokens) return { price: 0, filled: false };
+    var tokenInfo = spotMeta.tokens.find(function(t: any) { return t.name === coin; });
+    if (!tokenInfo) return { price: 0, filled: false };
+
+    var spotCoin = coin + "-SPOT";
+    var result = await hl.exchange.placeOrder({
+      coin: spotCoin,
+      is_buy: isBuySpot,
+      sz: parseFloat(spotSize.toFixed(6)),
+      limit_px: limitPx,
+      order_type: { limit: { tif: "Ioc" as any } },
+      reduce_only: false,
+    });
+
+    var filled = false;
+    var fillPx = 0;
+    if (result && result.response && result.response.data && result.response.data.statuses) {
+      var s = result.response.data.statuses[0];
+      if (s && s.filled) {
+        filled = true;
+        fillPx = parseFloat(s.filled.avgPx);
+      }
+    }
+
+    return { price: fillPx || spotPrice, filled: filled };
+  } catch (e: any) {
+    journal.logAction("WARN", "Spot hedge " + (isClose ? "close" : "open") + " " + coin + " failed: " + e.message);
+    return { price: 0, filled: false };
   }
 }
 
@@ -379,6 +516,15 @@ async function closeAllPaperPositions(): Promise<{ closed: string[]; errors: str
     var hl = await getMainnetSDK();
     var mids = await hl.info.getAllMids();
     var openTrades = await journal.getOpenTrades(true); // paper only
+
+    // Fetch builder-dex mids for any paper trades on non-main dexes
+    var builderCoins = openTrades.filter(function(t) { return t.coin.indexOf(":") !== -1; }).map(function(t) { return t.coin; });
+    if (builderCoins.length > 0) {
+      try {
+        var bdData = await fetchBuilderDexFunding(builderCoins);
+        for (var bk in bdData.mids) mids[bk] = bdData.mids[bk];
+      } catch (e: any) { /* non-critical */ }
+    }
 
     for (var trade of openTrades) {
       try {
@@ -690,9 +836,17 @@ async function checkPaperPositions(
         }
       }
 
+      // Minimum hold gate: non-SL/TP exits require holding through N funding settlements
+      var settlements = countSettlementsSince(trade.entryTime);
+      var holdGateMet = settlements >= config.minHoldSettlements;
+
       if (!exitReason && holdHours > config.maxHoldHours) exitReason = "max_hold";
-      if (!exitReason && !fundingFavorsUs) exitReason = "funding_flipped";
-      if (!exitReason && currentAPR < config.exitAPR) exitReason = "funding_reverted";
+      // funding_flipped: direction reversed — only if hold gate met
+      if (!exitReason && !fundingFavorsUs && holdGateMet) exitReason = "funding_flipped";
+      // funding_reverted: magnitude dropped AND direction no longer favors us (tightened)
+      if (!exitReason && currentAPR < config.exitAPR && !fundingFavorsUs && holdGateMet) exitReason = "funding_reverted";
+      // Also exit if funding magnitude dropped AND we've held long enough (even if direction still ok)
+      if (!exitReason && currentAPR < config.exitAPR && holdGateMet) exitReason = "funding_reverted";
 
       // Funding lock: skip non-critical exits if close to funding settlement
       if (exitReason && exitReason !== "stop_loss" && exitReason !== "take_profit" && config.fundingLockMinutes > 0) {
@@ -703,19 +857,43 @@ async function checkPaperPositions(
         }
       }
 
+      // Log if hold gate is blocking exit
+      if (!exitReason && !holdGateMet && (!fundingFavorsUs || currentAPR < config.exitAPR)) {
+        journal.logAction("HOLD", "[PAPER] " + trade.coin + " holding through settlement " + settlements + "/" + config.minHoldSettlements);
+      }
+
       if (exitReason) {
-        await journal.closeTrade(trade.id, midPrice, fundingMap[trade.coin] || 0, exitReason, unrealizedPnl, trade.fundingEarned);
+        // Calculate spot hedge PnL for paper mode
+        var spotPnl = 0;
+        var spotExPx: number | undefined;
+        if (trade.spotHedge && trade.spotEntryPrice && trade.spotSizeUSD) {
+          // Spot hedge: if we're SHORT perp + LONG spot, spot PnL = spotSize * (exitPrice - entryPrice) / entryPrice
+          var spotPriceChange = (midPrice - trade.spotEntryPrice) / trade.spotEntryPrice;
+          spotPnl = trade.direction === "short"
+            ? trade.spotSizeUSD * spotPriceChange   // long spot gains if price goes up
+            : trade.spotSizeUSD * (-spotPriceChange); // short spot gains if price goes down
+          spotExPx = midPrice;
+        }
+
+        var combinedPnl = unrealizedPnl + spotPnl;
+        await journal.closeTrade(trade.id, midPrice, fundingMap[trade.coin] || 0, exitReason, combinedPnl, trade.fundingEarned, spotExPx);
         result.closed.push(trade.coin + ":" + exitReason + " (paper)");
         journal.logAction("CLOSE", "[PAPER] " + trade.coin + " " + exitReason +
-          " PnL: $" + unrealizedPnl.toFixed(2) + " Funding: $" + trade.fundingEarned.toFixed(4));
+          " PnL: $" + combinedPnl.toFixed(2) + " (perp: $" + unrealizedPnl.toFixed(2) +
+          (spotPnl !== 0 ? ", spot: $" + spotPnl.toFixed(2) : "") +
+          ") Funding: $" + trade.fundingEarned.toFixed(4) +
+          " (settlements: " + settlements + ")");
 
-        var totalPnl = unrealizedPnl + trade.fundingEarned;
+        var totalPnl = combinedPnl + trade.fundingEarned;
         sendAlert(exitReason === "stop_loss" ? "\uD83D\uDEA8" : exitReason === "take_profit" ? "\uD83C\uDFAF" : "\uD83D\uDD34",
           "[PAPER] CLOSE " + trade.coin + " " + trade.direction.toUpperCase(),
           [
             "Reason: " + exitReason,
-            "Trade P&L: $" + totalPnl.toFixed(2) + " (price: $" + unrealizedPnl.toFixed(2) + ", funding: $" + trade.fundingEarned.toFixed(4) + ")",
+            "Trade P&L: $" + totalPnl.toFixed(2) + " (perp: $" + unrealizedPnl.toFixed(2) +
+              (spotPnl !== 0 ? ", spot: $" + spotPnl.toFixed(2) : "") +
+              ", funding: $" + trade.fundingEarned.toFixed(4) + ")",
             "Exit Price: $" + fmtPx(midPrice),
+            "Settlements captured: " + settlements,
           ]).catch(function() {});
       }
     } catch (e: any) {
@@ -802,14 +980,24 @@ async function checkExistingPositions(
           exitReason = "take_profit";
         }
       }
+
+      // Minimum hold gate: non-SL/TP exits require holding through N funding settlements
+      var settlements = countSettlementsSince(trade.entryTime);
+      var holdGateMet = settlements >= config.minHoldSettlements;
+
       if (!exitReason && holdHours > config.maxHoldHours) {
         exitReason = "max_hold";
       }
-      if (!exitReason && !fundingFavorsUs) {
-        exitReason = "funding_flipped"; // funding direction changed — we're now paying
+      if (!exitReason && !fundingFavorsUs && holdGateMet) {
+        exitReason = "funding_flipped";
       }
-      if (!exitReason && currentAPR < config.exitAPR) {
-        exitReason = "funding_reverted"; // magnitude dropped below exit threshold
+      if (!exitReason && currentAPR < config.exitAPR && holdGateMet) {
+        exitReason = "funding_reverted";
+      }
+
+      // Log if hold gate is blocking exit
+      if (!exitReason && !holdGateMet && (!fundingFavorsUs || currentAPR < config.exitAPR)) {
+        journal.logAction("HOLD", trade.coin + " holding through settlement " + settlements + "/" + config.minHoldSettlements);
       }
 
       // Funding lock: skip non-critical exits if close to funding settlement
@@ -862,7 +1050,23 @@ async function checkExistingPositions(
         }
 
         if (closedOk) {
-          await journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding);
+          // Unwind spot hedge if active
+          var spotExitPx: number | undefined;
+          if (trade.spotHedge && trade.spotSizeUSD) {
+            try {
+              var spotClose = await placeSpotHedge(hl, trade.coin, trade.spotSizeUSD, trade.direction, true);
+              if (spotClose.filled) {
+                spotExitPx = spotClose.price;
+                journal.logAction("SPOT", trade.coin + " spot hedge unwound @ $" + fmtPx(spotClose.price));
+              } else {
+                journal.logAction("WARN", trade.coin + " spot hedge unwind failed");
+              }
+            } catch (e: any) {
+              journal.logAction("WARN", "Spot unwind " + trade.coin + ": " + e.message);
+            }
+          }
+
+          await journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding, spotExitPx);
           result.closed.push(trade.coin + ":" + exitReason);
 
           var totalPnl = unrealizedPnl + cumFunding;
@@ -873,8 +1077,9 @@ async function checkExistingPositions(
               "Reason: " + exitReason,
               "Trade P&L: $" + totalPnl.toFixed(2) + " (price: $" + unrealizedPnl.toFixed(2) + ", funding: $" + cumFunding.toFixed(4) + ")",
               "Exit Price: $" + fmtPx(midPrice),
+              trade.spotHedge ? "Spot hedge unwound" + (spotExitPx ? " @ $" + fmtPx(spotExitPx) : " (failed)") : "",
               "Balance: $" + balInfo.balance.toFixed(2),
-            ]).catch(function() {});
+            ].filter(Boolean)).catch(function() {});
         }
       }
     } catch (e: any) {
@@ -967,6 +1172,16 @@ async function scanForOpportunities(
 
   journal.logAction("SCAN", "Found " + opportunities.length + " opportunities above " + (config.entryAPR * 100).toFixed(0) + "% APR (scanned " + result.scanned + " perps)");
 
+  // ── Entry window check: only enter within N minutes of funding settlement at :00 UTC ──
+  if (config.entryWindowMinutes > 0) {
+    var minsToSettlement = minutesUntilFundingSettlement();
+    if (minsToSettlement > config.entryWindowMinutes) {
+      journal.logAction("WINDOW", "Outside entry window — " + minsToSettlement + "min to settlement (window: " + config.entryWindowMinutes + "min)");
+      return; // Skip all entries this tick
+    }
+    journal.logAction("WINDOW", "Inside entry window — " + minsToSettlement + "min to settlement");
+  }
+
   for (var opp of opportunities) {
     if (openCount >= config.maxPositions) break;
 
@@ -981,6 +1196,23 @@ async function scanForOpportunities(
       result.skipped.push(opp.coin + ":sl_cooldown");
       journal.logAction("COOLDOWN", opp.coin + " skipped — in SL cooldown (" + config.slCooldownHours + "h)");
       continue;
+    }
+
+    // General re-entry cooldown: wait N hours after ANY exit on same coin
+    if (await isInReEntryCooldown(opp.coin, config.reEntryCooldownHours)) {
+      result.skipped.push(opp.coin + ":reentry_cooldown");
+      journal.logAction("COOLDOWN", opp.coin + " skipped — in re-entry cooldown (" + config.reEntryCooldownHours + "h)");
+      continue;
+    }
+
+    // Funding persistence check: require N consecutive hours above entry threshold
+    if (config.minFundingPersistHours > 0) {
+      var persistent = await isFundingPersistent(opp.coin, config.entryAPR, config.minFundingPersistHours);
+      if (!persistent) {
+        result.skipped.push(opp.coin + ":funding_not_persistent");
+        journal.logAction("FILTER", opp.coin + " skipped — funding not persistent for " + config.minFundingPersistHours + "h");
+        continue;
+      }
     }
 
     // ── Safety filters ──
@@ -1044,6 +1276,25 @@ async function scanForOpportunities(
           ? roundSigFigs(fillPrice * (1 + priceMoveThreshold), 5)
           : roundSigFigs(fillPrice * (1 - priceMoveThreshold), 5);
 
+        // Spot hedge for paper mode: simulate at current price
+        var spotHedgeActive = config.spotHedge && opp.coin.indexOf(":") === -1; // no spot for builder-dex
+        var spotEntryPx: number | null = null;
+        var spotSz = 0;
+        if (spotHedgeActive) {
+          try {
+            var spotMid = await getSpotMidPrice(hl, opp.coin);
+            if (spotMid > 0) {
+              spotEntryPx = spotMid;
+              spotSz = positionUSD * config.spotHedgeRatio;
+            } else {
+              spotHedgeActive = false;
+              journal.logAction("WARN", "[PAPER] No spot market for " + opp.coin + " — skipping hedge");
+            }
+          } catch (e: any) {
+            spotHedgeActive = false;
+          }
+        }
+
         var paperTrade: BotTrade = {
           id: genId(),
           coin: opp.coin,
@@ -1061,26 +1312,30 @@ async function scanForOpportunities(
           fundingEarned: 0,
           totalReturn: 0,
           status: "open",
-          spotHedge: false,
-          spotEntryPrice: null,
+          spotHedge: spotHedgeActive,
+          spotEntryPrice: spotEntryPx,
           spotExitPrice: null,
           paper: true,
           lastFundingCheck: Date.now(),
           stopPrice: simStopPrice,
+          settlementsCaptured: 0,
+          spotSizeUSD: spotHedgeActive ? spotSz : undefined,
         };
 
         await journal.addTrade(paperTrade);
         journal.logAction("OPEN", "[PAPER] " + opp.coin + " " + opp.direction.toUpperCase() +
           " $" + positionUSD + " @ $" + fmtPx(fillPrice) +
-          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + fmtPx(simStopPrice) + ")");
+          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + fmtPx(simStopPrice) + ")" +
+          (spotHedgeActive ? " [SPOT HEDGE $" + spotSz.toFixed(0) + " @ $" + fmtPx(spotEntryPx!) + "]" : ""));
 
         sendAlert("\uD83D\uDCDD", "[PAPER] OPEN " + opp.coin + " " + opp.direction.toUpperCase(), [
           "Size: $" + positionUSD + " @ " + lev + "x",
           "Price: $" + fmtPx(fillPrice),
           "APR: " + (opp.fundingAPR * 100).toFixed(0) + "%",
           "Stop-Loss: $" + fmtPx(simStopPrice),
+          spotHedgeActive ? "Spot Hedge: $" + spotSz.toFixed(0) + " @ $" + fmtPx(spotEntryPx!) : "",
           "Paper Balance: $" + config.paperBalance.toFixed(2),
-        ]).catch(function() {});
+        ].filter(Boolean)).catch(function() {});
 
         result.opened.push(opp.coin + ":" + opp.direction + " @ $" + fillPrice.toFixed(2) + " (paper)");
         openCount++;
@@ -1145,9 +1400,31 @@ async function scanForOpportunities(
           continue; // Skip — no position opened, don't record trade
         }
 
+        // Spot hedge on entry (real mode)
+        var realSpotHedge = config.spotHedge && opp.coin.indexOf(":") === -1;
+        var realSpotPx: number | null = null;
+        var realSpotSz = 0;
+        if (realSpotHedge) {
+          try {
+            var hedgeResult = await placeSpotHedge(hl, opp.coin, positionUSD * config.spotHedgeRatio, opp.direction, false);
+            if (hedgeResult.filled) {
+              realSpotPx = hedgeResult.price;
+              realSpotSz = positionUSD * config.spotHedgeRatio;
+              journal.logAction("SPOT", opp.coin + " spot hedge filled @ $" + fmtPx(realSpotPx));
+            } else {
+              realSpotHedge = false;
+              journal.logAction("WARN", opp.coin + " spot hedge failed — proceeding without");
+            }
+          } catch (e: any) {
+            realSpotHedge = false;
+            journal.logAction("WARN", "Spot hedge " + opp.coin + ": " + e.message);
+          }
+        }
+
         journal.logAction("OPEN", opp.coin + " " + opp.direction.toUpperCase() +
           " $" + positionUSD + " @ $" + fmtPx(fillPrice) +
-          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, filled " + fillSize + ")");
+          " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, filled " + fillSize + ")" +
+          (realSpotHedge ? " [SPOT HEDGE $" + realSpotSz.toFixed(0) + "]" : ""));
 
         // Record trade
         var trade: BotTrade = {
@@ -1167,12 +1444,14 @@ async function scanForOpportunities(
           fundingEarned: 0,
           totalReturn: 0,
           status: "open",
-          spotHedge: false,
-          spotEntryPrice: null,
+          spotHedge: realSpotHedge,
+          spotEntryPrice: realSpotPx,
           spotExitPrice: null,
           paper: false,
           lastFundingCheck: Date.now(),
           stopPrice: null,
+          settlementsCaptured: 0,
+          spotSizeUSD: realSpotHedge ? realSpotSz : undefined,
         };
 
         await journal.addTrade(trade);
@@ -1416,6 +1695,15 @@ async function getPaperPositionDetails(): Promise<Record<string, { unrealizedPnl
     var hl = await getMainnetSDK();
     var mids = await hl.info.getAllMids();
     var openTrades = await journal.getOpenTrades(true);
+
+    // Fetch builder-dex mids for any paper trades on non-main dexes
+    var builderCoins = openTrades.filter(function(t) { return t.coin.indexOf(":") !== -1; }).map(function(t) { return t.coin; });
+    if (builderCoins.length > 0) {
+      try {
+        var bdData = await fetchBuilderDexFunding(builderCoins);
+        for (var bk in bdData.mids) mids[bk] = bdData.mids[bk];
+      } catch (e: any) { /* non-critical */ }
+    }
 
     for (var trade of openTrades) {
       var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;

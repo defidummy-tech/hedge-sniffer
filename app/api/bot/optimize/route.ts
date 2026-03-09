@@ -259,6 +259,31 @@ export async function GET() {
       }
     }
 
+    // Funding strategy recommendations
+    rec.minHoldSettlements = 1;
+    explanations.push("Min hold 1 settlement — ensures at least one funding accrual per trade");
+    rec.reEntryCooldownHours = 2;
+    explanations.push("Re-entry cooldown 2h — prevents churning same coin repeatedly");
+    rec.entryWindowMinutes = 30;
+    explanations.push("Entry window 30min — only enter near funding settlement for immediate accrual");
+    rec.minFundingPersistHours = 2;
+    explanations.push("Funding persistence 2h — avoid entering on transient funding spikes");
+
+    // Adjust re-entry cooldown based on trade history
+    var reentryCount = 0;
+    for (var ci = 0; ci < closedTrades.length - 1; ci++) {
+      for (var cj = ci + 1; cj < closedTrades.length; cj++) {
+        if (closedTrades[ci].coin === closedTrades[cj].coin) {
+          var gap = Math.abs(closedTrades[cj].entryTime - (closedTrades[ci].exitTime || closedTrades[ci].entryTime));
+          if (gap < 3600000) reentryCount++; // re-entered within 1 hour
+        }
+      }
+    }
+    if (reentryCount > 5) {
+      rec.reEntryCooldownHours = 4;
+      explanations.push("Many rapid re-entries detected (" + reentryCount + ") — increased cooldown to 4h");
+    }
+
     // ── 4. Top opportunities right now ──
     var topOpps = qualifiedTokens.slice(0, 10).map(function(t) {
       return {
