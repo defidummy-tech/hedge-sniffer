@@ -219,6 +219,43 @@ async function isInSLCooldown(coin: string, cooldownHours: number): Promise<bool
   return false;
 }
 
+// ── Per-coin loss memory: count SL exits in a rolling window ──
+async function recentSLCount(coin: string, windowHours: number): Promise<number> {
+  var trades = await journal.getAllTrades();
+  var windowMs = windowHours * 3600000;
+  var now = Date.now();
+  var count = 0;
+  for (var i = trades.length - 1; i >= 0; i--) {
+    var t = trades[i];
+    if (t.exitTime && now - t.exitTime > windowMs) break; // trades are chronological
+    if (t.coin === coin && t.exitReason === "stop_loss" && t.exitTime) {
+      if (now - t.exitTime < windowMs) count++;
+    }
+  }
+  return count;
+}
+
+// ── Stale price detection: check if a coin's price has changed recently ──
+// Compares current mid against recent trade entry/exit prices — if identical, market is frozen
+async function isPriceStale(coin: string, currentMid: number): Promise<boolean> {
+  var trades = await journal.getAllTrades();
+  var matchCount = 0;
+  var recentTradeCount = 0;
+  // Look at last 5 trades for this coin
+  for (var i = trades.length - 1; i >= 0; i--) {
+    var t = trades[i];
+    if (t.coin !== coin) continue;
+    recentTradeCount++;
+    // Check if entry AND exit prices match previous trades exactly (frozen market)
+    if (t.entryPrice === currentMid || (t.exitPrice !== null && Math.abs(t.exitPrice - currentMid) < currentMid * 0.0001)) {
+      matchCount++;
+    }
+    if (recentTradeCount >= 3) break;
+  }
+  // If 2+ of last 3 trades had identical prices, market is stale
+  return matchCount >= 2;
+}
+
 // ── General re-entry cooldown: wait N hours after ANY exit on same coin ──
 async function isInReEntryCooldown(coin: string, cooldownHours: number): Promise<boolean> {
   if (cooldownHours <= 0) return false;
@@ -276,6 +313,34 @@ function countSettlementsSince(entryTime: number): number {
   var entryHour = Math.ceil(entryTime / 3600000); // ms -> hour boundary (rounded up)
   var nowHour = Math.floor(Date.now() / 3600000);  // ms -> hour boundary (rounded down)
   return Math.max(0, nowHour - entryHour);
+}
+
+// ── Get recent volatility (ATR-like) from 1h candles ──
+// Returns the average true range as a % of price over last 4 hours
+async function getRecentVolatility(coin: string): Promise<number> {
+  try {
+    var now = Date.now();
+    var fourHoursAgo = now - 4 * 3600000;
+    var candleData = await hlInfoPost({
+      type: "candleSnapshot",
+      req: { coin: coin, interval: "1h", startTime: fourHoursAgo, endTime: now },
+    });
+    if (!Array.isArray(candleData) || candleData.length === 0) return 0;
+    var totalRange = 0;
+    var avgPrice = 0;
+    for (var c of candleData) {
+      var high = parseFloat(c.h || "0");
+      var low = parseFloat(c.l || "0");
+      var mid = (high + low) / 2;
+      if (mid > 0) {
+        totalRange += (high - low) / mid;
+        avgPrice++;
+      }
+    }
+    return avgPrice > 0 ? (totalRange / avgPrice) * 100 : 0; // return as %
+  } catch (e) {
+    return 0;
+  }
 }
 
 // ── Check recent price drop (last 4h) using Hyperliquid candle API ──
@@ -1215,6 +1280,22 @@ async function scanForOpportunities(
       }
     }
 
+    // Per-coin loss memory: skip if stopped out 2+ times in last 48h
+    var slCount = await recentSLCount(opp.coin, 48);
+    if (slCount >= 2) {
+      result.skipped.push(opp.coin + ":repeat_loser(" + slCount + "SLs/48h)");
+      journal.logAction("FILTER", opp.coin + " skipped — " + slCount + " stop-losses in last 48h (blacklisted)");
+      continue;
+    }
+
+    // Stale price detection: skip if market appears frozen
+    var stale = await isPriceStale(opp.coin, opp.midPrice);
+    if (stale) {
+      result.skipped.push(opp.coin + ":stale_price");
+      journal.logAction("FILTER", opp.coin + " skipped — price appears stale/frozen (identical across recent trades)");
+      continue;
+    }
+
     // ── Safety filters ──
 
     // Min 24h volume filter
@@ -1271,7 +1352,12 @@ async function scanForOpportunities(
       // ── Paper mode: simulate fill at mid price ──
       try {
         var fillPrice = opp.midPrice;
-        var priceMoveThreshold = config.stopLossPct / (lev * 100);
+        // Volatility-adjusted stop: use at least 1.5x recent hourly ATR or the configured SL%, whichever is wider
+        var basePriceMoveThreshold = config.stopLossPct / (lev * 100);
+        var volatility = await getRecentVolatility(opp.coin);
+        // Minimum stop distance = 1.5 * average hourly range (as decimal)
+        var volBasedThreshold = volatility > 0 ? (volatility * 1.5) / 100 : 0;
+        var priceMoveThreshold = Math.max(basePriceMoveThreshold, volBasedThreshold);
         var simStopPrice = opp.direction === "short"
           ? roundSigFigs(fillPrice * (1 + priceMoveThreshold), 5)
           : roundSigFigs(fillPrice * (1 - priceMoveThreshold), 5);
@@ -1458,7 +1544,10 @@ async function scanForOpportunities(
 
         // Place stop-loss order directly on Hyperliquid for instant execution
         try {
-          var priceMoveThreshold = config.stopLossPct / (lev * 100);
+          var realBasePMT = config.stopLossPct / (lev * 100);
+          var realVol = await getRecentVolatility(opp.coin);
+          var realVolThreshold = realVol > 0 ? (realVol * 1.5) / 100 : 0;
+          var priceMoveThreshold = Math.max(realBasePMT, realVolThreshold);
           var stopPrice: number;
           var slBuy: boolean;
 
