@@ -378,6 +378,30 @@ async function getRecentPriceDrop(coin: string, currentPrice: number): Promise<n
   }
 }
 
+// ── Check recent price rise (last 4h) using Hyperliquid candle API ──
+// Used for short entries: skip if price pumped too much (momentum against short)
+async function getRecentPriceRise(coin: string, currentPrice: number): Promise<number> {
+  try {
+    var now = Date.now();
+    var fourHoursAgo = now - 4 * 3600000;
+    var candleData = await hlInfoPost({
+      type: "candleSnapshot",
+      req: { coin: coin, interval: "1h", startTime: fourHoursAgo, endTime: now },
+    });
+    if (!Array.isArray(candleData) || candleData.length === 0) return 0;
+    var lowPrice = Infinity;
+    for (var c of candleData) {
+      var l = parseFloat(c.l || "0");
+      if (l > 0 && l < lowPrice) lowPrice = l;
+    }
+    if (lowPrice <= 0 || lowPrice === Infinity) return 0;
+    var risePct = ((currentPrice - lowPrice) / lowPrice) * 100;
+    return Math.max(0, risePct);
+  } catch (e) {
+    return 0;
+  }
+}
+
 // ── Spot hedge helpers ──
 // Hyperliquid spot tokens use @{index} format where index = 10000 + asset index
 // The spot coin name is typically the same as perp name but with different routing
@@ -873,6 +897,33 @@ async function checkPaperPositions(
       // Update live PnL in journal
       await journal.updateTradePnl(trade.id, unrealizedPnl);
 
+      // Trailing stop: once profit exceeds activation threshold, ratchet stop to trail peak price
+      if (config.trailingStopPct > 0 && trade.stopPrice != null && unrealizedPnl > 0) {
+        var profitPctForTrail = (unrealizedPnl / trade.sizeUSD) * 100;
+        if (profitPctForTrail >= config.trailingStopPct) {
+          // Calculate trailing stop distance (same as original stop distance from entry)
+          var origStopDist = Math.abs(trade.entryPrice - trade.stopPrice);
+          var newStop: number;
+          if (trade.direction === "long") {
+            // Trail below the current high water mark
+            newStop = roundSigFigs(midPrice - origStopDist, 5);
+            if (newStop > trade.stopPrice) {
+              journal.logAction("TRAIL", "[PAPER] " + trade.coin + " trailing stop raised " + trade.stopPrice + " -> " + newStop + " (mid=" + midPrice + ", pnl=" + profitPctForTrail.toFixed(1) + "%)");
+              trade.stopPrice = newStop;
+              await journal.updateTradeStop(trade.id, newStop);
+            }
+          } else {
+            // Short: trail above the current low water mark
+            newStop = roundSigFigs(midPrice + origStopDist, 5);
+            if (newStop < trade.stopPrice) {
+              journal.logAction("TRAIL", "[PAPER] " + trade.coin + " trailing stop lowered " + trade.stopPrice + " -> " + newStop + " (mid=" + midPrice + ", pnl=" + profitPctForTrail.toFixed(1) + "%)");
+              trade.stopPrice = newStop;
+              await journal.updateTradeStop(trade.id, newStop);
+            }
+          }
+        }
+      }
+
       // Check exit conditions
       var exitReason: string | null = null;
       var rawAPR = fundingMap[trade.coin] || 0;
@@ -1028,6 +1079,30 @@ async function checkExistingPositions(
       for (var bmk in builderMids) mids[bmk] = builderMids[bmk];
       var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
 
+      // Trailing stop for real mode: ratchet stop using trade.stopPrice as peak tracker
+      if (config.trailingStopPct > 0 && trade.stopPrice != null && unrealizedPnl > 0) {
+        var profitPctReal = (unrealizedPnl / trade.sizeUSD) * 100;
+        if (profitPctReal >= config.trailingStopPct) {
+          var origStopDistReal = Math.abs(trade.entryPrice - trade.stopPrice);
+          var newStopReal: number;
+          if (trade.direction === "long") {
+            newStopReal = roundSigFigs(midPrice - origStopDistReal, 5);
+            if (newStopReal > trade.stopPrice) {
+              journal.logAction("TRAIL", trade.coin + " trailing stop raised " + trade.stopPrice + " -> " + newStopReal + " (mid=" + midPrice + ")");
+              trade.stopPrice = newStopReal;
+              await journal.updateTradeStop(trade.id, newStopReal);
+            }
+          } else {
+            newStopReal = roundSigFigs(midPrice + origStopDistReal, 5);
+            if (newStopReal < trade.stopPrice) {
+              journal.logAction("TRAIL", trade.coin + " trailing stop lowered " + trade.stopPrice + " -> " + newStopReal + " (mid=" + midPrice + ")");
+              trade.stopPrice = newStopReal;
+              await journal.updateTradeStop(trade.id, newStopReal);
+            }
+          }
+        }
+      }
+
       var exitReason: string | null = null;
 
       // Check if funding direction still favors our position
@@ -1035,9 +1110,17 @@ async function checkExistingPositions(
       var fundingFavorsUs = (trade.direction === "short" && rawAPR > 0) || // we're SHORT & longs pay us
                             (trade.direction === "long" && rawAPR < 0);   // we're LONG & shorts pay us
 
-      // Check exit conditions
+      // Check exit conditions — include trailing stop price check for real mode
       var lossPct = Math.abs(unrealizedPnl) / trade.sizeUSD * 100;
-      if (unrealizedPnl < 0 && lossPct > config.stopLossPct) {
+      var trailingStopHit = false;
+      if (trade.stopPrice != null && config.trailingStopPct > 0) {
+        trailingStopHit = trade.direction === "long"
+          ? midPrice <= trade.stopPrice
+          : midPrice >= trade.stopPrice;
+      }
+      if (trailingStopHit) {
+        exitReason = "stop_loss";
+      } else if (unrealizedPnl < 0 && lossPct > config.stopLossPct) {
         exitReason = "stop_loss";
       } else if (config.takeProfitPct > 0 && unrealizedPnl > 0) {
         var profitPct = (unrealizedPnl / trade.sizeUSD) * 100;
@@ -1312,13 +1395,23 @@ async function scanForOpportunities(
       continue;
     }
 
-    // Price momentum filter: skip if price dropped > maxDropPct in last 4h
+    // Price momentum filter: skip if price moved against our direction > maxDropPct in last 4h
+    // Long entries: skip if price dropped too much (momentum against us)
+    // Short entries: skip if price pumped too much (momentum against us)
     if (config.maxDropPct > 0) {
       try {
-        var dropPct = await getRecentPriceDrop(opp.coin, opp.midPrice);
-        if (dropPct > config.maxDropPct) {
-          result.skipped.push(opp.coin + ":price_drop(" + dropPct.toFixed(1) + "%)");
-          journal.logAction("FILTER", opp.coin + " skipped — price dropped " + dropPct.toFixed(1) + "% in 4h (max " + config.maxDropPct + "%)");
+        var movePct: number;
+        var moveLabel: string;
+        if (opp.direction === "long") {
+          movePct = await getRecentPriceDrop(opp.coin, opp.midPrice);
+          moveLabel = "dropped";
+        } else {
+          movePct = await getRecentPriceRise(opp.coin, opp.midPrice);
+          moveLabel = "pumped";
+        }
+        if (movePct > config.maxDropPct) {
+          result.skipped.push(opp.coin + ":price_momentum(" + movePct.toFixed(1) + "%)");
+          journal.logAction("FILTER", opp.coin + " skipped — price " + moveLabel + " " + movePct.toFixed(1) + "% in 4h (max " + config.maxDropPct + "%)");
           continue;
         }
       } catch (e: any) {
@@ -1585,6 +1678,10 @@ async function scanForOpportunities(
               throw new Error(slStatus.error);
             }
           }
+
+          // Store the stop price on the trade record for trailing stop tracking
+          trade.stopPrice = stopPrice;
+          await journal.updateTradeStop(trade.id, stopPrice);
 
           if (slAccepted) {
             journal.logAction("SL", opp.coin + " stop-loss set at $" + fmtPx(stopPrice) + " (" + config.stopLossPct + "% loss)");

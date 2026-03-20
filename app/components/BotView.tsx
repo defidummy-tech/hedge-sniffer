@@ -8,7 +8,7 @@ import type { BotConfig, BotStatus, BotTrade } from "../types";
 var DEFAULT_CONFIG: BotConfig = {
   enabled: false,
   testnet: true,
-  entryAPR: 10.0,
+  entryAPR: 18.0,
   exitAPR: 1.0,
   maxPositionUSD: 100,
   leverage: 3,
@@ -18,9 +18,10 @@ var DEFAULT_CONFIG: BotConfig = {
   fundingLockMinutes: 10,
   slCooldownHours: 24,
   takeProfitPct: 0,
+  trailingStopPct: 3,
   minVolume: 0,
   minOI: 0,
-  maxDropPct: 0,
+  maxDropPct: 3.5,
   maxOIPct: 0,
   minHoldSettlements: 1,
   reEntryCooldownHours: 2,
@@ -432,6 +433,7 @@ export default function BotView() {
             <ConfigSlider label="Max Positions" value={config.maxPositions} onChange={function(v) { upd("maxPositions", v); }} min={1} max={10} step={1} unit="" color={C.a} tip="Max concurrent open positions" />
             <ConfigSlider label="Stop Loss" value={config.stopLossPct} onChange={function(v) { upd("stopLossPct", v); }} min={1} max={25} step={0.5} unit="%" color={C.r} tip="Close if unrealized loss exceeds this %" />
             <ConfigSlider label="Take Profit" value={config.takeProfitPct} onChange={function(v) { upd("takeProfitPct", v); }} min={0} max={50} step={0.5} unit="%" color={C.g} tip="Close when profit exceeds this % of position size (0 = off)" />
+            <ConfigSlider label="Trailing Stop" value={config.trailingStopPct} onChange={function(v) { upd("trailingStopPct", v); }} min={0} max={20} step={0.5} unit="%" color={C.o} tip="Activate trailing stop after this profit %. Trails by stop-loss distance from peak price (0 = off)" />
             <ConfigSlider label="SL Cooldown" value={config.slCooldownHours} onChange={function(v) { upd("slCooldownHours", v); }} min={0} max={168} step={1} unit="h" color={C.r} tip="Hours to wait before re-entering a coin after stop-loss (0 = off)" />
             <ConfigSlider label="Max Hold Time" value={config.maxHoldHours} onChange={function(v) { upd("maxHoldHours", v); }} min={1} max={720} step={1} unit="h" color={C.y} tip="Force close after this many hours" />
             <ConfigSlider label="Funding Lock" value={config.fundingLockMinutes} onChange={function(v) { upd("fundingLockMinutes", v); }} min={0} max={55} step={5} unit="min" color={C.p} tip="Hold position this many minutes before funding settlement (0 = off)" />
@@ -485,7 +487,7 @@ export default function BotView() {
               </div>
               <div style={{ fontSize: 8, color: C.txD }}>Skip tokens with less than this open interest (0 = off)</div>
             </div>
-            <ConfigSlider label="Max Price Drop" value={config.maxDropPct} onChange={function(v) { upd("maxDropPct", v); }} min={0} max={30} step={1} unit="%" color={C.r} tip="Skip entry if price dropped more than this % in last 4h (0 = off)" />
+            <ConfigSlider label="Max Price Move" value={config.maxDropPct} onChange={function(v) { upd("maxDropPct", v); }} min={0} max={30} step={0.5} unit="%" color={C.r} tip="Skip entry if price moved against our direction more than this % in last 4h (0 = off)" />
             <ConfigSlider label="Max OI %" value={config.maxOIPct} onChange={function(v) { upd("maxOIPct", v); }} min={0} max={10} step={0.1} unit="%" color={C.y} tip="Cap position size as % of token OI — prevents outsized positions on illiquid tokens (0 = off)" />
             {config.paperTrading && (
               <ConfigSlider label="Paper Balance" value={config.paperBalance} onChange={function(v) { upd("paperBalance", v); }} min={100} max={100000} step={100} unit="$" color={C.y} tip="Simulated starting balance for paper trading" />
@@ -599,6 +601,9 @@ export default function BotView() {
               {config.takeProfitPct > 0 && (
                 <div>{"\uD83C\uDFAF"} <strong>Take Profit:</strong> Close when profit &gt; <span style={{ color: C.g, fontWeight: 600 }}>{config.takeProfitPct}%</span> (bypasses hold gate)</div>
               )}
+              {config.trailingStopPct > 0 && (
+                <div>{"\uD83D\uDCC8"} <strong>Trailing Stop:</strong> Activates at <span style={{ color: C.o, fontWeight: 600 }}>{config.trailingStopPct}%</span> profit, trails by stop distance from peak</div>
+              )}
               {config.slCooldownHours > 0 && (
                 <div>{"\u23F1"} <strong>SL Cooldown:</strong> Wait <span style={{ color: C.r, fontWeight: 600 }}>{config.slCooldownHours}h</span> before re-entering after stop-loss</div>
               )}
@@ -618,7 +623,7 @@ export default function BotView() {
                     <div style={{ paddingLeft: 20 }}>{"\u2022"} Min open interest: <span style={{ color: C.o, fontWeight: 600 }}>${config.minOI.toLocaleString()}</span></div>
                   )}
                   {config.maxDropPct > 0 && (
-                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Skip if price dropped &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.maxDropPct}%</span> in 4h</div>
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Skip if price moved against entry &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.maxDropPct}%</span> in 4h</div>
                   )}
                   {config.maxOIPct > 0 && (
                     <div style={{ paddingLeft: 20 }}>{"\u2022"} Cap position at <span style={{ color: C.y, fontWeight: 600 }}>{config.maxOIPct}%</span> of token OI</div>

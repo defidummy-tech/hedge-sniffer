@@ -97,7 +97,7 @@ function defaultConfig(): BotConfig {
   return {
     enabled: false, // ALWAYS false by default — must be enabled via UI
     testnet: parseBool(process.env.BOT_TESTNET, true),
-    entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "10"),
+    entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "18"),
     exitAPR: parseFloat(process.env.BOT_EXIT_APR || "1"),
     maxPositionUSD: parseFloat(process.env.BOT_MAX_POSITION || "100"),
     leverage: parseInt(process.env.BOT_LEVERAGE || "3"),
@@ -107,9 +107,10 @@ function defaultConfig(): BotConfig {
     fundingLockMinutes: parseFloat(process.env.BOT_FUNDING_LOCK_MINUTES || "10"),
     slCooldownHours: parseFloat(process.env.BOT_SL_COOLDOWN_HOURS || "24"),
     takeProfitPct: parseFloat(process.env.BOT_TAKE_PROFIT_PCT || "0"),
+    trailingStopPct: parseFloat(process.env.BOT_TRAILING_STOP_PCT || "3"),
     minVolume: parseFloat(process.env.BOT_MIN_VOLUME || "0"),
     minOI: parseFloat(process.env.BOT_MIN_OI || "0"),
-    maxDropPct: parseFloat(process.env.BOT_MAX_DROP_PCT || "0"),
+    maxDropPct: parseFloat(process.env.BOT_MAX_DROP_PCT || "3.5"),
     maxOIPct: parseFloat(process.env.BOT_MAX_OI_PCT || "0"),
     minHoldSettlements: parseInt(process.env.BOT_MIN_HOLD_SETTLEMENTS || "1"),
     reEntryCooldownHours: parseFloat(process.env.BOT_REENTRY_COOLDOWN_HOURS || "2"),
@@ -277,6 +278,15 @@ export async function updateTradePnl(tradeId: string, unrealizedPnl: number): Pr
   if (!trade) return;
   trade.pnl = unrealizedPnl;
   trade.totalReturn = trade.pnl + trade.fundingEarned;
+  saveAndSync(TRADES_FILE, "hedge:trades", trades);
+}
+
+export async function updateTradeStop(tradeId: string, newStop: number): Promise<void> {
+  await ensureInit();
+  var trades = await getAllTrades();
+  var trade = trades.find(function(t) { return t.id === tradeId; });
+  if (!trade) return;
+  trade.stopPrice = newStop;
   saveAndSync(TRADES_FILE, "hedge:trades", trades);
 }
 
