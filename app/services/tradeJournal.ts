@@ -97,8 +97,8 @@ function defaultConfig(): BotConfig {
   return {
     enabled: false, // ALWAYS false by default — must be enabled via UI
     testnet: parseBool(process.env.BOT_TESTNET, true),
-    entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "18"),
-    exitAPR: parseFloat(process.env.BOT_EXIT_APR || "1"),
+    entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "0.5"),
+    exitAPR: parseFloat(process.env.BOT_EXIT_APR || "0.5"),
     maxPositionUSD: parseFloat(process.env.BOT_MAX_POSITION || "100"),
     leverage: parseInt(process.env.BOT_LEVERAGE || "3"),
     maxPositions: parseInt(process.env.BOT_MAX_POSITIONS || "3"),
@@ -107,7 +107,7 @@ function defaultConfig(): BotConfig {
     fundingLockMinutes: parseFloat(process.env.BOT_FUNDING_LOCK_MINUTES || "10"),
     slCooldownHours: parseFloat(process.env.BOT_SL_COOLDOWN_HOURS || "24"),
     takeProfitPct: parseFloat(process.env.BOT_TAKE_PROFIT_PCT || "0"),
-    trailingStopPct: parseFloat(process.env.BOT_TRAILING_STOP_PCT || "3"),
+    trailingStopPct: parseFloat(process.env.BOT_TRAILING_STOP_PCT || "5"),
     minVolume: parseFloat(process.env.BOT_MIN_VOLUME || "0"),
     minOI: parseFloat(process.env.BOT_MIN_OI || "0"),
     maxDropPct: parseFloat(process.env.BOT_MAX_DROP_PCT || "3.5"),
@@ -172,6 +172,22 @@ function mergeWithDefaults(saved: any): BotConfig {
     } else {
       merged[k] = (defaults as any)[k];
     }
+  }
+  // ── Config migrations ──
+  // v1: entryAPR was set too high (18+), backtest shows 0.5 is optimal
+  if (merged.entryAPR >= 18) {
+    console.log("[journal] Migrating entryAPR from " + merged.entryAPR + " to " + defaults.entryAPR);
+    merged.entryAPR = defaults.entryAPR;
+  }
+  // v2: trailing stop 3% was too tight (capped winners), backtest shows 5% is optimal
+  if (saved && saved.trailingStopPct === 3) {
+    console.log("[journal] Migrating trailingStopPct from 3 to 5");
+    merged.trailingStopPct = 5;
+  }
+  // v3: exitAPR of 1.0 too high, backtest shows 0.5 is optimal
+  if (saved && saved.exitAPR >= 1.0) {
+    console.log("[journal] Migrating exitAPR from " + merged.exitAPR + " to " + defaults.exitAPR);
+    merged.exitAPR = defaults.exitAPR;
   }
   return merged as BotConfig;
 }
