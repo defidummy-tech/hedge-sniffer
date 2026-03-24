@@ -8,7 +8,7 @@ import type { BotConfig, BotStatus, BotTrade } from "../types";
 var DEFAULT_CONFIG: BotConfig = {
   enabled: false,
   testnet: true,
-  entryAPR: 18.0,
+  entryAPR: 1.0,
   exitAPR: 1.0,
   maxPositionUSD: 100,
   leverage: 3,

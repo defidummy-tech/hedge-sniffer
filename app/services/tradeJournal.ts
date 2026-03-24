@@ -174,10 +174,10 @@ function mergeWithDefaults(saved: any): BotConfig {
     }
   }
   // ── Config migrations ──
-  // v1: entryAPR was set too high (18+), backtest shows 0.5 is optimal
+  // v1: entryAPR was set too high (18+), migrate down to 1.0 (100%)
   if (merged.entryAPR >= 18) {
-    console.log("[journal] Migrating entryAPR from " + merged.entryAPR + " to " + defaults.entryAPR);
-    merged.entryAPR = defaults.entryAPR;
+    console.log("[journal] Migrating entryAPR from " + merged.entryAPR + " to 1.0");
+    merged.entryAPR = 1.0;
   }
   // v2: trailing stop <8% was too tight (capped winners at +$2-6 instead of letting $25+ runners develop)
   if (saved && saved.trailingStopPct != null && saved.trailingStopPct < 8) {

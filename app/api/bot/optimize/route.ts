@@ -201,17 +201,35 @@ export async function GET() {
     var rec: Record<string, any> = {};
     var explanations: string[] = [];
 
-    // ── Entry APR: based on which APR ranges actually make money ──
-    // Default to 0.5 (50%) — proven baseline
-    rec.entryAPR = 0.5;
-    if (bestBucket === "200-500%" || bestBucket === "500%+") {
-      rec.entryAPR = 1.0; // 100% — higher APR trades performing best
-      explanations.push("Best returns in " + bestBucket + " APR range — raising entry to 100%");
-    } else if (bestBucket === "100-200%") {
-      rec.entryAPR = 0.75;
-      explanations.push("Best returns in 100-200% APR range — entry APR 75%");
+    // ── Entry APR: data-driven from APR bucket performance ──
+    // Higher APR = stronger funding signal = better trades historically
+    // Map best bucket directly to threshold
+    var bucketToAPR: Record<string, number> = {
+      "500%+": 2.0,
+      "200-500%": 1.5,
+      "100-200%": 1.0,
+      "50-100%": 0.75,
+    };
+    if (bestBucket && bucketToAPR[bestBucket]) {
+      rec.entryAPR = bucketToAPR[bestBucket];
+      var bucketData = aprBuckets[bestBucket];
+      var bucketWinRate = bucketData.count > 0 ? (bucketData.wins / bucketData.count * 100).toFixed(0) : "0";
+      var bucketAvg = bucketData.count > 0 ? (bucketData.totalReturn / bucketData.count).toFixed(2) : "0";
+      explanations.push("Best returns in " + bestBucket + " APR range (win rate " + bucketWinRate + "%, avg $" + bucketAvg + ") — entry APR " + (rec.entryAPR * 100) + "%");
     } else {
-      explanations.push("Entry APR 50% — solid baseline from trade data");
+      // Not enough data in any bucket — default to 100%
+      rec.entryAPR = 1.0;
+      explanations.push("Entry APR 100% — default (insufficient data per bucket)");
+    }
+
+    // Cross-check: if lower APR bucket is significantly worse, make sure we're above it
+    var lowBucket = aprBuckets["50-100%"];
+    if (lowBucket.count >= 3) {
+      var lowAvg = lowBucket.totalReturn / lowBucket.count;
+      if (lowAvg < 0 && rec.entryAPR < 1.0) {
+        rec.entryAPR = 1.0;
+        explanations.push("50-100% APR trades are net negative (avg $" + lowAvg.toFixed(2) + ") — raising floor to 100%");
+      }
     }
 
     // ── Exit APR: hold until funding drops significantly ──
