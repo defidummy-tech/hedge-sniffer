@@ -235,6 +235,24 @@ async function recentSLCount(coin: string, windowHours: number): Promise<number>
   return count;
 }
 
+// ── Per-coin cumulative loss in rolling 24h window ──
+async function getCoinLoss24h(coin: string): Promise<number> {
+  var trades = await journal.getAllTrades();
+  var windowMs = 24 * 3600000;
+  var now = Date.now();
+  var totalLoss = 0;
+  for (var i = trades.length - 1; i >= 0; i--) {
+    var t = trades[i];
+    if (t.exitTime && now - t.exitTime > windowMs) break;
+    if (t.coin === coin && t.exitTime && t.totalReturn < 0) {
+      if (now - t.exitTime < windowMs) {
+        totalLoss += Math.abs(t.totalReturn);
+      }
+    }
+  }
+  return totalLoss;
+}
+
 // ── Stale price detection: check if a coin's price has changed recently ──
 // Compares current mid against recent trade entry/exit prices — if identical, market is frozen
 async function isPriceStale(coin: string, currentMid: number): Promise<boolean> {
@@ -1416,6 +1434,30 @@ async function scanForOpportunities(
         }
       } catch (e: any) {
         // Non-critical: if candle fetch fails, allow entry
+      }
+    }
+
+    // Max volatility filter: skip coins where recent hourly ATR is too high (gap risk)
+    if (config.maxVolatilityPct > 0) {
+      try {
+        var recentVol = await getRecentVolatility(opp.coin);
+        if (recentVol > config.maxVolatilityPct) {
+          result.skipped.push(opp.coin + ":high_volatility(" + recentVol.toFixed(1) + "%)");
+          journal.logAction("FILTER", opp.coin + " skipped — volatility " + recentVol.toFixed(1) + "% > max " + config.maxVolatilityPct + "% (gap risk)");
+          continue;
+        }
+      } catch (e: any) {
+        // Non-critical: if volatility fetch fails, allow entry
+      }
+    }
+
+    // Per-coin daily loss limit: stop trading a coin after losing $X in rolling 24h
+    if (config.perCoinMaxLoss > 0) {
+      var coinLoss24h = await getCoinLoss24h(opp.coin);
+      if (coinLoss24h >= config.perCoinMaxLoss) {
+        result.skipped.push(opp.coin + ":daily_loss_limit($" + coinLoss24h.toFixed(0) + ")");
+        journal.logAction("FILTER", opp.coin + " skipped — lost $" + coinLoss24h.toFixed(2) + " in 24h (max $" + config.perCoinMaxLoss + ")");
+        continue;
       }
     }
 

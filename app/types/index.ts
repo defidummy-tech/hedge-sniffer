@@ -270,6 +270,8 @@ export interface BotConfig {
   reEntryCooldownHours: number; // Wait N hours before re-entering ANY coin after ANY exit
   entryWindowMinutes: number; // Only enter within N minutes of funding settlement (0 = off)
   minFundingPersistHours: number; // Require funding above entry threshold for N consecutive hours (0 = off)
+  maxVolatilityPct: number;       // Skip coins where recent hourly ATR > this % (0 = off)
+  perCoinMaxLoss: number;         // Max cumulative loss per coin in rolling 24h before blacklisting ($, 0 = off)
   spotHedge: boolean;
   spotHedgeRatio: number;
   paperTrading: boolean;

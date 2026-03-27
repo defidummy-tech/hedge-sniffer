@@ -116,6 +116,8 @@ function defaultConfig(): BotConfig {
     reEntryCooldownHours: parseFloat(process.env.BOT_REENTRY_COOLDOWN_HOURS || "2"),
     entryWindowMinutes: parseInt(process.env.BOT_ENTRY_WINDOW_MINUTES || "30"),
     minFundingPersistHours: parseInt(process.env.BOT_MIN_FUNDING_PERSIST_HOURS || "2"),
+    maxVolatilityPct: parseFloat(process.env.BOT_MAX_VOLATILITY_PCT || "5"),
+    perCoinMaxLoss: parseFloat(process.env.BOT_PER_COIN_MAX_LOSS || "10"),
     spotHedge: parseBool(process.env.BOT_SPOT_HEDGE, false),
     spotHedgeRatio: parseFloat(process.env.BOT_SPOT_HEDGE_RATIO || "1"),
     paperTrading: parseBool(process.env.BOT_PAPER_TRADING, false),

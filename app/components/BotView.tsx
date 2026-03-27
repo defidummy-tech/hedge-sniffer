@@ -27,6 +27,8 @@ var DEFAULT_CONFIG: BotConfig = {
   reEntryCooldownHours: 2,
   entryWindowMinutes: 30,
   minFundingPersistHours: 2,
+  maxVolatilityPct: 5,
+  perCoinMaxLoss: 10,
   spotHedge: false,
   spotHedgeRatio: 1.0,
   paperTrading: false,
@@ -489,6 +491,8 @@ export default function BotView() {
             </div>
             <ConfigSlider label="Max Price Move" value={config.maxDropPct} onChange={function(v) { upd("maxDropPct", v); }} min={0} max={30} step={0.5} unit="%" color={C.r} tip="Skip entry if price moved against our direction more than this % in last 4h (0 = off)" />
             <ConfigSlider label="Max OI %" value={config.maxOIPct} onChange={function(v) { upd("maxOIPct", v); }} min={0} max={10} step={0.1} unit="%" color={C.y} tip="Cap position size as % of token OI — prevents outsized positions on illiquid tokens (0 = off)" />
+            <ConfigSlider label="Max Volatility" value={config.maxVolatilityPct} onChange={function(v) { upd("maxVolatilityPct", v); }} min={0} max={20} step={0.5} unit="%" color={C.r} tip="Skip coins where recent hourly ATR exceeds this % — prevents gap-through stop losses on ultra-volatile coins (0 = off)" />
+            <ConfigSlider label="Per-Coin Loss Limit" value={config.perCoinMaxLoss} onChange={function(v) { upd("perCoinMaxLoss", v); }} min={0} max={50} step={1} unit="$" color={C.r} tip="Stop trading a coin after losing this much in rolling 24h — prevents repeat losses on the same coin (0 = off)" />
             {config.paperTrading && (
               <ConfigSlider label="Paper Balance" value={config.paperBalance} onChange={function(v) { upd("paperBalance", v); }} min={100} max={100000} step={100} unit="$" color={C.y} tip="Simulated starting balance for paper trading" />
             )}
@@ -613,7 +617,7 @@ export default function BotView() {
               <div>{"\u23F0"} <strong>Max Hold:</strong> Force close after <span style={{ color: C.y, fontWeight: 600 }}>{config.maxHoldHours}h</span></div>
               <div>{"\uD83D\uDCB0"} <strong>Size:</strong> Up to <span style={{ color: C.a, fontWeight: 600 }}>${config.maxPositionUSD}</span> at <span style={{ color: C.p, fontWeight: 600 }}>{config.leverage}x</span> leverage</div>
               <div>{"\uD83D\uDCCA"} <strong>Max Positions:</strong> <span style={{ color: C.a, fontWeight: 600 }}>{config.maxPositions}</span> concurrent</div>
-              {(config.minVolume > 0 || config.minOI > 0 || config.maxDropPct > 0 || config.maxOIPct > 0) && (
+              {(config.minVolume > 0 || config.minOI > 0 || config.maxDropPct > 0 || config.maxOIPct > 0 || config.maxVolatilityPct > 0 || config.perCoinMaxLoss > 0) && (
                 <div style={{ marginTop: 4, paddingTop: 4, borderTop: "1px solid " + C.b + "30" }}>
                   <div style={{ fontSize: 10, color: C.txD, fontWeight: 600, marginBottom: 2 }}>{"\uD83D\uDEE1"} SAFETY FILTERS</div>
                   {config.minVolume > 0 && (
@@ -627,6 +631,12 @@ export default function BotView() {
                   )}
                   {config.maxOIPct > 0 && (
                     <div style={{ paddingLeft: 20 }}>{"\u2022"} Cap position at <span style={{ color: C.y, fontWeight: 600 }}>{config.maxOIPct}%</span> of token OI</div>
+                  )}
+                  {config.maxVolatilityPct > 0 && (
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Skip if hourly ATR &gt; <span style={{ color: C.r, fontWeight: 600 }}>{config.maxVolatilityPct}%</span> (gap risk)</div>
+                  )}
+                  {config.perCoinMaxLoss > 0 && (
+                    <div style={{ paddingLeft: 20 }}>{"\u2022"} Per-coin 24h loss limit: <span style={{ color: C.r, fontWeight: 600 }}>${config.perCoinMaxLoss}</span></div>
                   )}
                 </div>
               )}

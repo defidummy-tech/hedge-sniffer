@@ -340,6 +340,36 @@ export async function GET() {
     rec.minFundingPersistHours = 2;
     explanations.push("Funding strategy: hold 1+ settlements, 30min entry window, 2h persistence check");
 
+    // ── Max volatility: data-driven from outsized losses ──
+    // Analyze trades where loss exceeded 2x the normal stop — these are gap-through events
+    var gapLosses = closedTrades.filter(function(t) {
+      return t.exitReason === "stop_loss" && t.totalReturn < 0 && Math.abs(t.totalReturn) > config.stopLossPct * 1.2;
+    });
+    if (gapLosses.length >= 2) {
+      rec.maxVolatilityPct = 4;
+      var gapLossTotal = gapLosses.reduce(function(s, t) { return s + t.totalReturn; }, 0);
+      explanations.push(gapLosses.length + " gap-through losses totaling $" + gapLossTotal.toFixed(0) + " — max volatility 4% to filter ultra-volatile coins");
+    } else {
+      rec.maxVolatilityPct = 5;
+      explanations.push("Max volatility 5% — filters coins with extreme hourly ATR (gap risk)");
+    }
+
+    // ── Per-coin daily loss limit: based on repeat losers ──
+    var worstCoinLoss = 0;
+    for (var ck in coinStats) {
+      if (coinStats[ck].pnl < worstCoinLoss) worstCoinLoss = coinStats[ck].pnl;
+    }
+    if (worstCoinLoss < -15) {
+      rec.perCoinMaxLoss = 8;
+      explanations.push("Worst coin lost $" + Math.abs(worstCoinLoss).toFixed(0) + " — per-coin 24h limit $8 to prevent repeat bleeding");
+    } else if (worstCoinLoss < -10) {
+      rec.perCoinMaxLoss = 10;
+      explanations.push("Per-coin 24h loss limit $10 — stop trading coins that keep losing");
+    } else {
+      rec.perCoinMaxLoss = 12;
+      explanations.push("Per-coin 24h loss limit $12 — light guardrail against repeat losses");
+    }
+
     // Adjust re-entry cooldown based on churning
     var reentryCount = 0;
     for (var ci = 0; ci < closedTrades.length - 1; ci++) {
