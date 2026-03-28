@@ -37,6 +37,7 @@ import FundingHarvest from "./components/FundingHarvest";
 import BacktestView from "./components/BacktestView";
 import BotView from "./components/BotView";
 import PerformanceView from "./components/PerformanceView";
+import TweetSettingsView from "./components/TweetSettingsView";
 
 /* ═══════════ MAIN APP ═══════════ */
 export default function App() {
@@ -136,6 +137,9 @@ export default function App() {
 
       {/* ═══ PERFORMANCE VIEW ═══ */}
       {view === "performance" && <PerformanceView />}
+
+      {/* ═══ TWEETS VIEW ═══ */}
+      {view === "tweets" && <TweetSettingsView />}
 
       {/* ═══ SNIFFER VIEW ═══ */}
       {view === "sniffer" && (

@@ -162,7 +162,7 @@ export interface Deal {
 
 export type Direction = "long" | "short";
 export type VarPeriod = "1d" | "3d" | "7d" | "14d" | "30d";
-export type AppView = "scanner" | "sniffer" | "backtest" | "bot" | "performance";
+export type AppView = "scanner" | "sniffer" | "backtest" | "bot" | "performance" | "tweets";
 export type OptimizerMode = "balanced" | "funding_harvest" | "directional";
 
 // ── Backtest types ──

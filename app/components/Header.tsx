@@ -35,6 +35,7 @@ export default function Header({ onShowGuide, isLive, loading, error, onRefresh,
             { v: "backtest", l: "\uD83D\uDCCA Backtest", c: C.o },
             { v: "bot", l: "\uD83E\uDD16 Bot", c: C.g },
             { v: "performance", l: "\uD83C\uDFC6 P&L", c: C.p },
+            { v: "tweets", l: "\uD83D\uDCE2 Tweets", c: C.y },
           ] as { v: AppView; l: string; c: string }[]).map(function(tab, i) {
             return (
               <button key={tab.v} onClick={function() { onViewChange(tab.v); }} style={{
