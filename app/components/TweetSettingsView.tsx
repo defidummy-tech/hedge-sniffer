@@ -21,7 +21,7 @@ function Slider(props: { label: string; value: number; onChange: (v: number) => 
 }
 
 var DEFAULT_TWEET_CONFIG: TweetConfig = {
-  enableHigh: true, enableSustained: true, enableDeals: true,
+  enableHigh: false, enableSustained: false, enableDeals: false,
   extremeAPR: 9, highAPR: 5, sustainedAPR: 2, sustainedDays: 7,
   dealMinScore: 50, dealMinAPR: 0.5,
   cooldownHighHours: 4, cooldownSustainedHours: 24, cooldownDealHours: 8,

@@ -85,6 +85,16 @@ async function doInit(): Promise<void> {
         console.log("[journal] Restored " + redisTrades.length + " trades from Redis");
       }
     }
+
+    // If local tweet config is missing, pull from Redis
+    var localTweetConfig = loadJSON(TWEET_CONFIG_FILE);
+    if (!localTweetConfig) {
+      var redisTweetConfig = await redisGet("hedge:tweet-config");
+      if (redisTweetConfig) {
+        saveJSON(TWEET_CONFIG_FILE, redisTweetConfig);
+        console.log("[journal] Restored tweet config from Redis");
+      }
+    }
   } catch (e) {
     console.error("[journal] Redis init failed:", e);
   }
@@ -240,9 +250,9 @@ export async function updateConfig(partial: Partial<BotConfig>): Promise<BotConf
 
 function defaultTweetConfig(): TweetConfig {
   return {
-    enableHigh: true,
-    enableSustained: true,
-    enableDeals: true,
+    enableHigh: false,
+    enableSustained: false,
+    enableDeals: false,
     extremeAPR: 9,
     highAPR: 5,
     sustainedAPR: 2,
