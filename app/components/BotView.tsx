@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { C } from "../utils/constants";
-import type { BotConfig, BotStatus, BotTrade } from "../types";
+import type { BotConfig, BotStatus, BotTrade, TweetConfig } from "../types";
 
 // ── Default Config ──
 
@@ -155,6 +155,14 @@ export default function BotView() {
   var [fundingRates, setFundingRates] = useState<Record<string, number>>({});
   var [optimizing, setOptimizing] = useState(false);
   var [optResult, setOptResult] = useState<any>(null);
+  var [tweetConfig, setTweetConfig] = useState<TweetConfig>({
+    enableHigh: true, enableSustained: true, enableDeals: true,
+    extremeAPR: 9, highAPR: 5, sustainedAPR: 2, sustainedDays: 7,
+    dealMinScore: 50, dealMinAPR: 0.5,
+    cooldownHighHours: 4, cooldownSustainedHours: 24, cooldownDealHours: 8,
+    globalCooldownMinutes: 30, maxTweetsPerRun: 1,
+  });
+  var [tweetSaving, setTweetSaving] = useState(false);
 
   // Fetch bot status
   var fetchStatus = useCallback(async function() {
@@ -180,6 +188,10 @@ export default function BotView() {
   // Poll every 30 seconds
   useEffect(function() {
     fetchStatus();
+    // Load tweet config
+    fetch("/api/bot/tweet-config").then(function(r) { return r.json(); }).then(function(j) {
+      if (j.ok && j.config) setTweetConfig(j.config);
+    }).catch(function() {});
     var interval = setInterval(fetchStatus, 30000);
     return function() { clearInterval(interval); };
   }, [fetchStatus]);
@@ -203,6 +215,29 @@ export default function BotView() {
       setSaving(false);
     }
   }, [config]);
+
+  // Save tweet config
+  var saveTweetConfig = useCallback(async function() {
+    setTweetSaving(true);
+    try {
+      var res = await fetch("/api/bot/tweet-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(tweetConfig),
+      });
+      if (!res.ok) throw new Error("Save failed: " + res.status);
+      setStatusMsg("Tweet config saved!");
+      setTimeout(function() { setStatusMsg(null); }, 3000);
+    } catch (e: any) {
+      setStatusMsg("Tweet save failed: " + (e.message || "unknown"));
+    } finally {
+      setTweetSaving(false);
+    }
+  }, [tweetConfig]);
+
+  function tUpd(key: string, val: any) {
+    setTweetConfig(function(prev) { return { ...prev, [key]: val }; });
+  }
 
   // Kill switch — actually closes positions on Hyperliquid
   var [killing, setKilling] = useState(false);
@@ -533,6 +568,59 @@ export default function BotView() {
               {statusMsg}
             </div>
           )}
+        </div>
+
+        {/* ═══ Tweet Alert Settings ═══ */}
+        <div style={{ background: C.s, border: "1px solid " + C.b, borderRadius: 10, padding: 16 }}>
+          <div style={{ fontSize: 13, fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, marginBottom: 10 }}>
+            <span style={{ color: C.a }}>{"\uD83D\uDCE2"} Tweet</span> Alert Settings
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* Toggles */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[
+                { key: "enableHigh", label: "High Funding" },
+                { key: "enableSustained", label: "Sustained" },
+                { key: "enableDeals", label: "Deals" },
+              ].map(function(toggle) {
+                var active = (tweetConfig as any)[toggle.key];
+                return (
+                  <button key={toggle.key} onClick={function() { tUpd(toggle.key, !active); }} style={{
+                    padding: "4px 10px", borderRadius: 6, fontSize: 10, fontFamily: "monospace", fontWeight: 600, cursor: "pointer",
+                    border: "1px solid " + (active ? C.g : C.r) + "50",
+                    background: (active ? C.g : C.r) + "15",
+                    color: active ? C.g : C.r,
+                  }}>
+                    {active ? "\u2713" : "\u2717"} {toggle.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ fontSize: 9, color: C.txD, fontWeight: 600, marginTop: 4 }}>{"\uD83C\uDFAF"} THRESHOLDS</div>
+            <ConfigSlider label="Extreme APR (any coin)" value={+(tweetConfig.extremeAPR * 100).toFixed(0)} onChange={function(v) { tUpd("extremeAPR", v / 100); }} min={100} max={5000} step={100} unit="%" color={C.r} tip="Tweet ANY coin above this funding APR" />
+            <ConfigSlider label="High APR (known coins)" value={+(tweetConfig.highAPR * 100).toFixed(0)} onChange={function(v) { tUpd("highAPR", v / 100); }} min={100} max={2000} step={50} unit="%" color={C.o} tip="Tweet known/popular coins above this APR" />
+            <ConfigSlider label="Sustained APR" value={+(tweetConfig.sustainedAPR * 100).toFixed(0)} onChange={function(v) { tUpd("sustainedAPR", v / 100); }} min={50} max={1000} step={25} unit="%" color={C.y} tip="Tweet if avg APR sustained above this over lookback period" />
+            <ConfigSlider label="Sustained Lookback" value={tweetConfig.sustainedDays} onChange={function(v) { tUpd("sustainedDays", v); }} min={1} max={30} step={1} unit="d" color={C.a} tip="Days to average funding for sustained alerts" />
+            <ConfigSlider label="Deal Min Score" value={tweetConfig.dealMinScore} onChange={function(v) { tUpd("dealMinScore", v); }} min={10} max={100} step={5} unit="" color={C.p} tip="Min deal quality score to tweet" />
+            <ConfigSlider label="Deal Min APR" value={+(tweetConfig.dealMinAPR * 100).toFixed(0)} onChange={function(v) { tUpd("dealMinAPR", v / 100); }} min={10} max={500} step={10} unit="%" color={C.p} tip="Min funding APR for deal tweets" />
+
+            <div style={{ fontSize: 9, color: C.txD, fontWeight: 600, marginTop: 4 }}>{"\u23F1"} COOLDOWNS</div>
+            <ConfigSlider label="Global Cooldown" value={tweetConfig.globalCooldownMinutes} onChange={function(v) { tUpd("globalCooldownMinutes", v); }} min={5} max={120} step={5} unit="min" color={C.r} tip="Min minutes between ANY tweets (prevents rapid-fire)" />
+            <ConfigSlider label="High Alert Cooldown" value={tweetConfig.cooldownHighHours} onChange={function(v) { tUpd("cooldownHighHours", v); }} min={1} max={48} step={1} unit="h" color={C.o} tip="Hours before tweeting same coin again (high funding)" />
+            <ConfigSlider label="Sustained Cooldown" value={tweetConfig.cooldownSustainedHours} onChange={function(v) { tUpd("cooldownSustainedHours", v); }} min={4} max={72} step={4} unit="h" color={C.y} tip="Hours before tweeting same coin again (sustained)" />
+            <ConfigSlider label="Deal Cooldown" value={tweetConfig.cooldownDealHours} onChange={function(v) { tUpd("cooldownDealHours", v); }} min={2} max={48} step={2} unit="h" color={C.p} tip="Hours before tweeting same coin again (deal)" />
+            <ConfigSlider label="Max Tweets/Run" value={tweetConfig.maxTweetsPerRun} onChange={function(v) { tUpd("maxTweetsPerRun", v); }} min={1} max={5} step={1} unit="" color={C.a} tip="Max tweets per cron invocation (prevents spam bursts)" />
+
+            <button onClick={saveTweetConfig} disabled={tweetSaving} style={{
+              padding: "10px 16px", borderRadius: 8, border: "1px solid " + C.a + "50",
+              background: "linear-gradient(135deg," + C.a + "15," + C.p + "10)",
+              color: C.a, fontFamily: "monospace", fontSize: 12, fontWeight: 700,
+              cursor: tweetSaving ? "wait" : "pointer", width: "100%",
+            }}>
+              {tweetSaving ? "\u27F3" : "\u2714"} Save Tweet Settings
+            </button>
+          </div>
         </div>
 
         {/* ═══ RIGHT: Positions + Activity ═══ */}

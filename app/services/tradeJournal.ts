@@ -9,12 +9,13 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import type { BotTrade, BotConfig } from "../types";
+import type { BotTrade, BotConfig, TweetConfig } from "../types";
 
 // ── Storage paths ──
 var DATA_DIR = process.env.BOT_DATA_DIR || "/tmp/hedge-sniffer";
 var CONFIG_FILE = join(DATA_DIR, "bot-config.json");
 var TRADES_FILE = join(DATA_DIR, "bot-trades.json");
+var TWEET_CONFIG_FILE = join(DATA_DIR, "tweet-config.json");
 
 try { mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { /* ok */ }
 
@@ -232,6 +233,62 @@ export async function updateConfig(partial: Partial<BotConfig>): Promise<BotConf
     (current as any)[k] = (partial as any)[k];
   }
   saveAndSync(CONFIG_FILE, "hedge:config", current);
+  return { ...current };
+}
+
+// ── Tweet Config ──
+
+function defaultTweetConfig(): TweetConfig {
+  return {
+    enableHigh: true,
+    enableSustained: true,
+    enableDeals: true,
+    extremeAPR: 9,
+    highAPR: 5,
+    sustainedAPR: 2,
+    sustainedDays: 7,
+    dealMinScore: 50,
+    dealMinAPR: 0.5,
+    cooldownHighHours: 4,
+    cooldownSustainedHours: 24,
+    cooldownDealHours: 8,
+    globalCooldownMinutes: 30,
+    maxTweetsPerRun: 1,
+  };
+}
+
+function mergeWithTweetDefaults(partial: any): TweetConfig {
+  var def = defaultTweetConfig();
+  if (!partial || typeof partial !== "object") return def;
+  for (var k in def) {
+    if (partial[k] !== undefined) (def as any)[k] = partial[k];
+  }
+  return def;
+}
+
+export async function getTweetConfig(): Promise<TweetConfig> {
+  await ensureInit();
+  var diskConfig = loadJSON(TWEET_CONFIG_FILE);
+  if (diskConfig) return mergeWithTweetDefaults(diskConfig);
+  if (USE_REDIS) {
+    try {
+      var redisConfig = await redisGet("hedge:tweet-config");
+      if (redisConfig) {
+        saveJSON(TWEET_CONFIG_FILE, redisConfig);
+        return mergeWithTweetDefaults(redisConfig);
+      }
+    } catch (e) { /* ok */ }
+  }
+  return defaultTweetConfig();
+}
+
+export async function updateTweetConfig(partial: Partial<TweetConfig>): Promise<TweetConfig> {
+  await ensureInit();
+  var current = await getTweetConfig();
+  for (var k in partial) {
+    (current as any)[k] = (partial as any)[k];
+  }
+  saveAndSync(TWEET_CONFIG_FILE, "hedge:tweet-config", current);
   return { ...current };
 }
 

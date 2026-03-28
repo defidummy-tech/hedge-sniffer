@@ -278,6 +278,23 @@ export interface BotConfig {
   paperBalance: number;
 }
 
+export interface TweetConfig {
+  enableHigh: boolean;
+  enableSustained: boolean;
+  enableDeals: boolean;
+  extremeAPR: number;        // APR threshold for ANY asset (e.g. 9 = 900%)
+  highAPR: number;           // APR threshold for known assets (e.g. 5 = 500%)
+  sustainedAPR: number;      // Avg APR over sustained period (e.g. 2 = 200%)
+  sustainedDays: number;     // Lookback period for sustained alerts
+  dealMinScore: number;      // Min deal scanner score
+  dealMinAPR: number;        // Min APR for deal tweets (e.g. 0.5 = 50%)
+  cooldownHighHours: number;
+  cooldownSustainedHours: number;
+  cooldownDealHours: number;
+  globalCooldownMinutes: number;
+  maxTweetsPerRun: number;   // Max tweets per cron invocation
+}
+
 export interface BotStatus {
   config: BotConfig;
   accountBalance: number;

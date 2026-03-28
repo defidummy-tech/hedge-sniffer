@@ -29,23 +29,13 @@ import {
   processHighAlert,
   processSustainedAlert,
   processDealTweet,
+  setGlobalCooldownMs,
+  setCooldownHours,
 } from "../../../services/twitterClient";
 import type { FundingHistoryPoint } from "../../../services/twitterClient";
 import { scanDeals } from "../../../services/dealScanner";
 import { PRIORITY_MAPPINGS } from "../../../services/marketMapping";
-
-// ── Configurable thresholds ──
-var EXTREME_APR = parseFloat(process.env.TWEET_THRESHOLD_EXTREME_APR || "5.0");
-var HIGH_APR = parseFloat(process.env.TWEET_THRESHOLD_HIGH_APR || "1.0");
-var SUSTAINED_APR = parseFloat(process.env.TWEET_THRESHOLD_SUSTAINED_APR || "2.0");
-var SUSTAINED_DAYS = parseInt(process.env.TWEET_SUSTAINED_DAYS || "7", 10);
-var DEAL_MIN_SCORE = parseFloat(process.env.TWEET_DEAL_MIN_SCORE || "50");
-var DEAL_MIN_APR = parseFloat(process.env.TWEET_DEAL_MIN_APR || "0.5");
-
-// ── Feature toggles ──
-var ENABLE_HIGH = process.env.TWEET_ENABLE_HIGH !== "false";
-var ENABLE_SUSTAINED = process.env.TWEET_ENABLE_SUSTAINED !== "false";
-var ENABLE_DEALS = process.env.TWEET_ENABLE_DEALS !== "false";
+import * as journal from "../../../services/tradeJournal";
 
 // Known asset syms from priority mappings
 var KNOWN_SYMS = new Set(PRIORITY_MAPPINGS.map(function(m) { return m.sym; }));
@@ -66,6 +56,23 @@ export async function GET(request: Request) {
   var stats = { highQualified: 0, sustainedCandidates: 0, sustainedQualified: 0, dealsFound: 0, dealsQualified: 0 };
 
   try {
+    // ── Load tweet config from storage (UI-configurable) ──
+    var tc = await journal.getTweetConfig();
+    var EXTREME_APR = tc.extremeAPR;
+    var HIGH_APR = tc.highAPR;
+    var SUSTAINED_APR = tc.sustainedAPR;
+    var SUSTAINED_DAYS = tc.sustainedDays;
+    var DEAL_MIN_SCORE = tc.dealMinScore;
+    var DEAL_MIN_APR = tc.dealMinAPR;
+    var ENABLE_HIGH = tc.enableHigh;
+    var ENABLE_SUSTAINED = tc.enableSustained;
+    var ENABLE_DEALS = tc.enableDeals;
+    var MAX_TWEETS_PER_RUN = tc.maxTweetsPerRun;
+
+    // Update runtime cooldowns from config
+    setGlobalCooldownMs(tc.globalCooldownMinutes * 60 * 1000);
+    setCooldownHours(tc.cooldownHighHours, tc.cooldownSustainedHours, tc.cooldownDealHours);
+
     // ── Fetch all assets from Hyperliquid ──
     var assets = await fetchAssetsForCron();
     scanned = assets.length;
@@ -108,9 +115,7 @@ export async function GET(request: Request) {
     // ════════════════════════════════════════════
     // PASS 2: Sustained high funding (7-day avg)
     // ════════════════════════════════════════════
-    // Max 1 tweet per cron run to prevent rapid-fire posting
     var tweetsThisRun = posted.length;
-    var MAX_TWEETS_PER_RUN = 1;
     if (ENABLE_SUSTAINED && tweetsThisRun < MAX_TWEETS_PER_RUN) {
       // Pre-filter: only check assets with current APR above half the threshold
       var sustainedCandidates = [];
@@ -223,18 +228,6 @@ export async function GET(request: Request) {
     skipped: skipped,
     errors: errors,
     stats: stats,
-    thresholds: {
-      extreme: EXTREME_APR,
-      high: HIGH_APR,
-      sustained: SUSTAINED_APR,
-      sustainedDays: SUSTAINED_DAYS,
-      dealMinScore: DEAL_MIN_SCORE,
-      dealMinAPR: DEAL_MIN_APR,
-    },
-    config: {
-      highEnabled: ENABLE_HIGH,
-      sustainedEnabled: ENABLE_SUSTAINED,
-      dealsEnabled: ENABLE_DEALS,
-    },
+    tweetConfig: tc,
   });
 }

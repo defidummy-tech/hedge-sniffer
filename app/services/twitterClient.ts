@@ -45,20 +45,29 @@ function pickRandom(arr: string[]): string {
 
 var lastTweetByKey: Map<string, number> = new Map();
 var lastTweetGlobal: number = 0;
-var GLOBAL_COOLDOWN = parseInt(process.env.TWEET_GLOBAL_COOLDOWN_MINUTES || "30") * 60 * 1000; // configurable, default 30 min between any tweets
+var GLOBAL_COOLDOWN = parseInt(process.env.TWEET_GLOBAL_COOLDOWN_MINUTES || "30") * 60 * 1000;
+
+// Runtime-configurable cooldown durations (set from stored config each cron run)
+var cooldownHighMs = parseFloat(process.env.TWEET_COOLDOWN_HIGH_HOURS || "4") * 3600000;
+var cooldownSustainedMs = parseFloat(process.env.TWEET_COOLDOWN_SUSTAINED_HOURS || "24") * 3600000;
+var cooldownDealMs = parseFloat(process.env.TWEET_COOLDOWN_DEAL_HOURS || "8") * 3600000;
+
+/** Update global cooldown from UI config */
+export function setGlobalCooldownMs(ms: number): void {
+  GLOBAL_COOLDOWN = ms;
+}
+
+/** Update per-type cooldowns from UI config */
+export function setCooldownHours(highH: number, sustainedH: number, dealH: number): void {
+  cooldownHighMs = highH * 3600000;
+  cooldownSustainedMs = sustainedH * 3600000;
+  cooldownDealMs = dealH * 3600000;
+}
 
 function getCooldownMs(type: string): number {
-  if (type === "sustained") {
-    var hours = parseFloat(process.env.TWEET_COOLDOWN_SUSTAINED_HOURS || "24");
-    return hours * 60 * 60 * 1000;
-  }
-  if (type === "deal") {
-    var dHours = parseFloat(process.env.TWEET_COOLDOWN_DEAL_HOURS || "8");
-    return dHours * 60 * 60 * 1000;
-  }
-  // "high" (default)
-  var hHours = parseFloat(process.env.TWEET_COOLDOWN_HIGH_HOURS || "4");
-  return hHours * 60 * 60 * 1000;
+  if (type === "sustained") return cooldownSustainedMs;
+  if (type === "deal") return cooldownDealMs;
+  return cooldownHighMs;
 }
 
 /** Check if an asset+type combo is in cooldown */
