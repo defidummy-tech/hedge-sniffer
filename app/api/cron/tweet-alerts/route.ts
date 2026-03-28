@@ -19,6 +19,7 @@
 // │ TWEET_ENABLE_HIGH                  │ true    │ Toggle high-funding tweets             │
 // │ TWEET_ENABLE_SUSTAINED             │ true    │ Toggle sustained-funding tweets        │
 // │ TWEET_ENABLE_DEALS                 │ true    │ Toggle deal alert tweets               │
+// │ TWEET_GLOBAL_COOLDOWN_MINUTES      │ 30      │ Min minutes between ANY tweets         │
 // └─────────────────────────────────────┴─────────┴──────────────────────────────────────┘
 
 import { NextResponse } from "next/server";
@@ -107,7 +108,10 @@ export async function GET(request: Request) {
     // ════════════════════════════════════════════
     // PASS 2: Sustained high funding (7-day avg)
     // ════════════════════════════════════════════
-    if (ENABLE_SUSTAINED) {
+    // Max 1 tweet per cron run to prevent rapid-fire posting
+    var tweetsThisRun = posted.length;
+    var MAX_TWEETS_PER_RUN = 1;
+    if (ENABLE_SUSTAINED && tweetsThisRun < MAX_TWEETS_PER_RUN) {
       // Pre-filter: only check assets with current APR above half the threshold
       var sustainedCandidates = [];
       for (var si = 0; si < assets.length; si++) {
@@ -168,7 +172,8 @@ export async function GET(request: Request) {
     // ════════════════════════════════════════════
     // PASS 3: Deal alerts (funding_harvest deals)
     // ════════════════════════════════════════════
-    if (ENABLE_DEALS) {
+    tweetsThisRun = posted.length;
+    if (ENABLE_DEALS && tweetsThisRun < MAX_TWEETS_PER_RUN) {
       var deals = scanDeals(assets);
       stats.dealsFound = deals.length;
 

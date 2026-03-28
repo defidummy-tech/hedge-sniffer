@@ -45,7 +45,7 @@ function pickRandom(arr: string[]): string {
 
 var lastTweetByKey: Map<string, number> = new Map();
 var lastTweetGlobal: number = 0;
-var GLOBAL_COOLDOWN = 2 * 60 * 1000; // 2 minutes between any tweets
+var GLOBAL_COOLDOWN = parseInt(process.env.TWEET_GLOBAL_COOLDOWN_MINUTES || "30") * 60 * 1000; // configurable, default 30 min between any tweets
 
 function getCooldownMs(type: string): number {
   if (type === "sustained") {
