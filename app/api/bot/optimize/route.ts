@@ -222,13 +222,21 @@ export async function GET() {
       explanations.push("Entry APR 100% — default (insufficient data per bucket)");
     }
 
-    // Cross-check: if lower APR bucket is significantly worse, make sure we're above it
+    // Cross-check: if lower APR buckets are net negative, raise the floor
     var lowBucket = aprBuckets["50-100%"];
     if (lowBucket.count >= 3) {
       var lowAvg = lowBucket.totalReturn / lowBucket.count;
       if (lowAvg < 0 && rec.entryAPR < 1.0) {
         rec.entryAPR = 1.0;
         explanations.push("50-100% APR trades are net negative (avg $" + lowAvg.toFixed(2) + ") — raising floor to 100%");
+      }
+    }
+    var midBucket = aprBuckets["100-200%"];
+    if (midBucket.count >= 3) {
+      var midAvg = midBucket.totalReturn / midBucket.count;
+      if (midAvg < 0 && rec.entryAPR < 1.5) {
+        rec.entryAPR = 1.5;
+        explanations.push("100-200% APR trades are net negative (avg $" + midAvg.toFixed(2) + ") — raising floor to 150%");
       }
     }
 
@@ -333,12 +341,35 @@ export async function GET() {
       explanations.push("Take profit disabled — let runners develop (max win: $" + maxWin.toFixed(2) + ")");
     }
 
-    // ── Funding strategy: keep proven defaults ──
-    rec.minHoldSettlements = 1;
+    // ── Funding strategy: data-driven hold time ──
+    // Analyze trades that exited quickly (funding_reverted/flipped within 3 settlements)
+    var quickExits = closedTrades.filter(function(t) {
+      var holdHrs = ((t.exitTime || t.entryTime) - t.entryTime) / 3600000;
+      return (t.exitReason === "funding_reverted" || t.exitReason === "funding_flipped") && holdHrs < 3;
+    });
+    var quickExitPnl = quickExits.reduce(function(s, t) { return s + t.totalReturn; }, 0);
+    var longHoldTrades = closedTrades.filter(function(t) {
+      var holdHrs = ((t.exitTime || t.entryTime) - t.entryTime) / 3600000;
+      return holdHrs >= 3;
+    });
+    var longHoldPnl = longHoldTrades.length > 0
+      ? longHoldTrades.reduce(function(s, t) { return s + t.totalReturn; }, 0) / longHoldTrades.length : 0;
+
+    if (quickExits.length >= 10 && quickExitPnl < 0) {
+      rec.minHoldSettlements = 4;
+      explanations.push(quickExits.length + " quick exits (<3h) lost $" + Math.abs(quickExitPnl).toFixed(0) + " total — raising min hold to 4 settlements to reduce churn");
+    } else if (quickExits.length >= 5 && quickExitPnl < 0) {
+      rec.minHoldSettlements = 3;
+      explanations.push(quickExits.length + " quick exits (<3h) net negative — min hold 3 settlements");
+    } else {
+      rec.minHoldSettlements = 2;
+      explanations.push("Min hold 2 settlements — ensure at least 2h of funding capture");
+    }
+
     rec.reEntryCooldownHours = 2;
     rec.entryWindowMinutes = 30;
     rec.minFundingPersistHours = 2;
-    explanations.push("Funding strategy: hold 1+ settlements, 30min entry window, 2h persistence check");
+    explanations.push("30min entry window, 2h persistence check, 2h re-entry cooldown");
 
     // ── Max volatility: data-driven from outsized losses ──
     // Analyze trades where loss exceeded 2x the normal stop — these are gap-through events
@@ -368,6 +399,24 @@ export async function GET() {
     } else {
       rec.perCoinMaxLoss = 12;
       explanations.push("Per-coin 24h loss limit $12 — light guardrail against repeat losses");
+    }
+
+    // ── Coin blacklist: auto-suggest chronic losers ──
+    // Blacklist coins with: 3+ trades AND win rate < 30% AND net negative
+    var blacklistCandidates: string[] = [];
+    for (var blk in coinStats) {
+      var cs = coinStats[blk];
+      var coinWinRate = cs.count > 0 ? cs.wins / cs.count : 0;
+      if (cs.count >= 3 && coinWinRate < 0.3 && cs.pnl < -5) {
+        blacklistCandidates.push(blk.replace(/-PERP$/, ""));
+      }
+    }
+    if (blacklistCandidates.length > 0) {
+      rec.coinBlacklist = blacklistCandidates;
+      explanations.push("Auto-blacklist " + blacklistCandidates.join(", ") + " — chronic losers (3+ trades, <30% win rate, net negative)");
+    } else {
+      rec.coinBlacklist = [];
+      explanations.push("No coins qualify for blacklist — all coins have acceptable performance");
     }
 
     // Adjust re-entry cooldown based on churning

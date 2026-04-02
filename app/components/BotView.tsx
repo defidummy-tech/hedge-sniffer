@@ -23,12 +23,13 @@ var DEFAULT_CONFIG: BotConfig = {
   minOI: 0,
   maxDropPct: 3.5,
   maxOIPct: 0,
-  minHoldSettlements: 1,
+  minHoldSettlements: 3,
   reEntryCooldownHours: 2,
   entryWindowMinutes: 30,
   minFundingPersistHours: 2,
   maxVolatilityPct: 5,
   perCoinMaxLoss: 10,
+  coinBlacklist: [],
   spotHedge: false,
   spotHedgeRatio: 1.0,
   paperTrading: false,
@@ -493,6 +494,29 @@ export default function BotView() {
             <ConfigSlider label="Max OI %" value={config.maxOIPct} onChange={function(v) { upd("maxOIPct", v); }} min={0} max={10} step={0.1} unit="%" color={C.y} tip="Cap position size as % of token OI — prevents outsized positions on illiquid tokens (0 = off)" />
             <ConfigSlider label="Max Volatility" value={config.maxVolatilityPct} onChange={function(v) { upd("maxVolatilityPct", v); }} min={0} max={20} step={0.5} unit="%" color={C.r} tip="Skip coins where recent hourly ATR exceeds this % — prevents gap-through stop losses on ultra-volatile coins (0 = off)" />
             <ConfigSlider label="Per-Coin Loss Limit" value={config.perCoinMaxLoss} onChange={function(v) { upd("perCoinMaxLoss", v); }} min={0} max={50} step={1} unit="$" color={C.r} tip="Stop trading a coin after losing this much in rolling 24h — prevents repeat losses on the same coin (0 = off)" />
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.txM, fontFamily: "monospace", marginBottom: 2 }}>
+                <span style={{ textTransform: "uppercase", fontWeight: 600 }}>{"\uD83D\uDEAB"} Coin Blacklist</span>
+                <span style={{ color: C.r, fontWeight: 700 }}>{config.coinBlacklist.length} blocked</span>
+              </div>
+              <input
+                type="text"
+                placeholder="e.g. SOPH, BLAST, XAI"
+                value={config.coinBlacklist.join(", ")}
+                onChange={function(e) {
+                  var val = e.target.value;
+                  var coins = val.split(",").map(function(s) { return s.trim().toUpperCase(); }).filter(Boolean);
+                  upd("coinBlacklist", coins);
+                }}
+                style={{
+                  width: "100%", padding: "6px 8px", borderRadius: 6, fontSize: 12,
+                  fontFamily: "monospace", fontWeight: 700, color: C.r,
+                  background: C.sL, border: "1px solid " + C.b,
+                  outline: "none", boxSizing: "border-box",
+                }}
+              />
+              <div style={{ fontSize: 8, color: C.txD }}>Comma-separated coin symbols to never trade (optimizer auto-suggests chronic losers)</div>
+            </div>
             {config.paperTrading && (
               <ConfigSlider label="Paper Balance" value={config.paperBalance} onChange={function(v) { upd("paperBalance", v); }} min={100} max={100000} step={100} unit="$" color={C.y} tip="Simulated starting balance for paper trading" />
             )}

@@ -1357,6 +1357,19 @@ async function scanForOpportunities(
       continue;
     }
 
+    // Coin blacklist: skip coins the user has explicitly blocked
+    if (config.coinBlacklist && config.coinBlacklist.length > 0) {
+      var coinBase = opp.coin.replace(/-PERP$/, "").replace(/.*:/, ""); // "SOPH-PERP" → "SOPH", "xyz:xyz:MU" → "MU"
+      var isBlacklisted = config.coinBlacklist.some(function(b) {
+        return b.toUpperCase() === coinBase.toUpperCase() || b.toUpperCase() === opp.coin.toUpperCase();
+      });
+      if (isBlacklisted) {
+        result.skipped.push(opp.coin + ":blacklisted");
+        journal.logAction("FILTER", opp.coin + " skipped — coin is blacklisted");
+        continue;
+      }
+    }
+
     // Skip if coin is in stop-loss cooldown
     if (await isInSLCooldown(opp.coin, config.slCooldownHours)) {
       result.skipped.push(opp.coin + ":sl_cooldown");

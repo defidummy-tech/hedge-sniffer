@@ -272,6 +272,7 @@ export interface BotConfig {
   minFundingPersistHours: number; // Require funding above entry threshold for N consecutive hours (0 = off)
   maxVolatilityPct: number;       // Skip coins where recent hourly ATR > this % (0 = off)
   perCoinMaxLoss: number;         // Max cumulative loss per coin in rolling 24h before blacklisting ($, 0 = off)
+  coinBlacklist: string[];        // Coins to never trade (e.g. ["SOPH", "BLAST", "XAI"])
   spotHedge: boolean;
   spotHedgeRatio: number;
   paperTrading: boolean;
