@@ -741,6 +741,58 @@ async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
   }
 }
 
+// ── Auto-blacklist: analyze trade history and blacklist chronic losers ──
+var lastBlacklistCheck = 0;
+var BLACKLIST_CHECK_INTERVAL = 6 * 3600 * 1000; // every 6 hours
+
+async function autoUpdateBlacklist(config: BotConfig): Promise<void> {
+  var now = Date.now();
+  if (now - lastBlacklistCheck < BLACKLIST_CHECK_INTERVAL) return;
+  lastBlacklistCheck = now;
+
+  var allTrades = await journal.getAllTrades();
+  var closed = allTrades.filter(function(t) { return t.status !== "open"; });
+  if (closed.length < 10) return; // not enough data
+
+  // Build per-coin stats
+  var coinStats: Record<string, { count: number; wins: number; pnl: number; slCount: number }> = {};
+  for (var t of closed) {
+    var base = t.coin.replace(/-PERP$/, "").replace(/.*:/, "");
+    if (!coinStats[base]) coinStats[base] = { count: 0, wins: 0, pnl: 0, slCount: 0 };
+    coinStats[base].count++;
+    if (t.totalReturn > 0) coinStats[base].wins++;
+    coinStats[base].pnl += t.totalReturn;
+    if (t.exitReason === "stop_loss" && t.totalReturn < 0) coinStats[base].slCount++;
+  }
+
+  // Find chronic losers: 3+ trades, <30% win rate, net loss > $5
+  var autoBlacklist: string[] = [];
+  for (var coin in coinStats) {
+    var cs = coinStats[coin];
+    var winRate = cs.count > 0 ? cs.wins / cs.count : 0;
+    if (cs.count >= 3 && winRate < 0.3 && cs.pnl < -5) {
+      autoBlacklist.push(coin);
+    }
+  }
+
+  if (autoBlacklist.length === 0) return;
+
+  // Merge with existing blacklist (don't remove user entries)
+  var existing = (config.coinBlacklist || []).map(function(s) { return s.toUpperCase(); });
+  var newEntries: string[] = [];
+  for (var ab of autoBlacklist) {
+    if (existing.indexOf(ab.toUpperCase()) === -1) {
+      newEntries.push(ab.toUpperCase());
+    }
+  }
+
+  if (newEntries.length === 0) return;
+
+  var merged = existing.concat(newEntries);
+  await journal.updateConfig({ coinBlacklist: merged });
+  journal.logAction("BLACKLIST", "Auto-added " + newEntries.join(", ") + " (chronic losers: 3+ trades, <30% win rate, net negative)");
+}
+
 // ── Main bot tick ──
 export async function botTick(): Promise<{
   scanned: number;
@@ -803,7 +855,16 @@ export async function botTick(): Promise<{
     result.errors.push("Position check: " + e.message);
   }
 
+  // ── Step 1.5: Auto-update coin blacklist from trade history ──
+  try {
+    await autoUpdateBlacklist(config);
+  } catch (e: any) {
+    journal.logAction("WARN", "Auto-blacklist: " + e.message);
+  }
+
   // ── Step 2: Scan for new opportunities ──
+  // Re-read config in case blacklist was updated
+  config = await journal.getConfig();
   try {
     await scanForOpportunities(hl, config, result);
   } catch (e: any) {
