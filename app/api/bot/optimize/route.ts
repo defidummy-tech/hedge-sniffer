@@ -448,8 +448,13 @@ export async function GET() {
     var currentExpectancy = closedTrades.length > 0
       ? (avgWinReturn * winRate + avgLoseReturn * (1 - winRate)) : 0;
 
-    // ── 5. Top opportunities right now ──
-    var topOpps = qualifiedTokens.slice(0, 10).map(function(t) {
+    // ── 5. Top opportunities right now (main dex + builder dex combined) ──
+    var mainDexOpps = qualifiedTokens.filter(function(t) { return t.coin.indexOf(":") === -1; });
+    var builderDexOpps = qualifiedTokens.filter(function(t) { return t.coin.indexOf(":") !== -1; });
+    // Take top 10 from main dex + top 5 from builder dex, then sort by APR
+    var combinedOpps = mainDexOpps.slice(0, 10).concat(builderDexOpps.slice(0, 5));
+    combinedOpps.sort(function(a, b) { return Math.abs(b.fundingAPR) - Math.abs(a.fundingAPR); });
+    var topOpps = combinedOpps.map(function(t) {
       return {
         coin: t.coin,
         fundingAPR: +(t.fundingAPR * 100).toFixed(1),
