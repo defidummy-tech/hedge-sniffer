@@ -22,6 +22,7 @@ async function hlPost(body: any): Promise<any> {
 
 // Token quality score: 0-100 based on liquidity, volume, OI, and funding stability
 function scoreToken(metrics: {
+  coin?: string;
   volume: number;
   openInterest: number;
   fundingAPR: number;
@@ -30,15 +31,21 @@ function scoreToken(metrics: {
   var score = 0;
   var reasons: string[] = [];
 
+  // Builder dex coins (xyz:xyz:CL, flx:flx:OIL, etc.) have fundamentally different
+  // liquidity profiles — give them baseline volume/OI scores instead of penalizing
+  var isBuilderDex = metrics.coin ? metrics.coin.indexOf(":") !== -1 : false;
+
   var volScore = 0;
-  if (metrics.volume > 1000000) { volScore = 30; reasons.push("High volume ($" + (metrics.volume / 1e6).toFixed(1) + "M)"); }
+  if (isBuilderDex) { volScore = 20; reasons.push("Builder dex — volume filter skipped"); }
+  else if (metrics.volume > 1000000) { volScore = 30; reasons.push("High volume ($" + (metrics.volume / 1e6).toFixed(1) + "M)"); }
   else if (metrics.volume > 100000) { volScore = 20; reasons.push("Medium volume ($" + (metrics.volume / 1e3).toFixed(0) + "K)"); }
   else if (metrics.volume > 10000) { volScore = 10; reasons.push("Low volume ($" + (metrics.volume / 1e3).toFixed(0) + "K)"); }
   else { volScore = 0; reasons.push("Very low volume ($" + Math.round(metrics.volume) + ")"); }
   score += volScore;
 
   var oiScore = 0;
-  if (metrics.openInterest > 500000) { oiScore = 30; reasons.push("Strong OI ($" + (metrics.openInterest / 1e6).toFixed(1) + "M)"); }
+  if (isBuilderDex) { oiScore = 20; reasons.push("Builder dex — OI filter skipped"); }
+  else if (metrics.openInterest > 500000) { oiScore = 30; reasons.push("Strong OI ($" + (metrics.openInterest / 1e6).toFixed(1) + "M)"); }
   else if (metrics.openInterest > 50000) { oiScore = 20; reasons.push("Decent OI ($" + (metrics.openInterest / 1e3).toFixed(0) + "K)"); }
   else if (metrics.openInterest > 5000) { oiScore = 10; reasons.push("Thin OI ($" + (metrics.openInterest / 1e3).toFixed(0) + "K)"); }
   else { oiScore = 0; reasons.push("Dangerously low OI ($" + Math.round(metrics.openInterest) + ")"); }
@@ -88,7 +95,7 @@ export async function GET() {
       var vol = parseFloat(ctx.dayNtlVlm || "0");
       var oi = parseFloat(ctx.openInterest || "0");
       if (mid <= 0) return;
-      var quality = scoreToken({ volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid });
+      var quality = scoreToken({ coin: u.name, volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid });
       tokenMetrics.push({ coin: u.name, volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid, maxLev: u.maxLeverage || 3, quality: quality });
     });
 
@@ -115,8 +122,9 @@ export async function GET() {
             var oi = parseFloat(ctx.openInterest || "0");
             if (mid <= 0) return;
             var apr = rate * 8760;
-            var quality = scoreToken({ volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid });
-            tokenMetrics.push({ coin: dexData.dexName + ":" + u.name, volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid, maxLev: u.maxLeverage || 3, quality: quality });
+            var coinName = dexData.dexName + ":" + u.name;
+            var quality = scoreToken({ coin: coinName, volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid });
+            tokenMetrics.push({ coin: coinName, volume: vol, openInterest: oi, fundingAPR: apr, midPrice: mid, maxLev: u.maxLeverage || 3, quality: quality });
           });
         }
       }
@@ -314,8 +322,10 @@ export async function GET() {
     var highQualityTokens = qualifiedTokens.filter(function(t) { return t.quality.score >= 50; });
     var medQualityTokens = qualifiedTokens.filter(function(t) { return t.quality.score >= 30 && t.quality.score < 50; });
 
-    var volumes = qualifiedTokens.map(function(t) { return t.volume; }).sort(function(a, b) { return a - b; });
-    var oiValues = qualifiedTokens.map(function(t) { return t.openInterest; }).sort(function(a, b) { return a - b; });
+    // Exclude builder dex from median calculations — their lower liquidity would skew thresholds
+    var mainDexTokens = qualifiedTokens.filter(function(t) { return t.coin.indexOf(":") === -1; });
+    var volumes = mainDexTokens.map(function(t) { return t.volume; }).sort(function(a, b) { return a - b; });
+    var oiValues = mainDexTokens.map(function(t) { return t.openInterest; }).sort(function(a, b) { return a - b; });
     var medianVolume = volumes.length > 0 ? volumes[Math.floor(volumes.length * 0.25)] : 0;
     var medianOI = oiValues.length > 0 ? oiValues[Math.floor(oiValues.length * 0.25)] : 0;
 
