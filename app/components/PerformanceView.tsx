@@ -31,7 +31,7 @@ function computeStats(trades: BotTrade[]): PerformanceStats {
     totalTrades: trades.length,
     openTrades: open.length,
     closedTrades: closed.length,
-    totalPnL: trades.reduce(function(s, t) { return s + t.pnl; }, 0),
+    totalPnL: trades.reduce(function(s, t) { return s + t.totalReturn; }, 0),
     totalFundingEarned: trades.reduce(function(s, t) { return s + t.fundingEarned; }, 0),
     winRate: closed.length > 0 ? (winners.length / closed.length) * 100 : 0,
     avgReturn: returns.length > 0 ? returns.reduce(function(s, v) { return s + v; }, 0) / returns.length : 0,
