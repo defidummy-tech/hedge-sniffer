@@ -1472,16 +1472,19 @@ async function scanForOpportunities(
     }
 
     // ── Safety filters ──
+    // Builder dex coins (xyz:xyz:CL, flx:flx:OIL, etc.) have fundamentally different
+    // liquidity profiles — lower volume/OI but stable funding. Skip volume/OI filters for them.
+    var isBuilderDex = opp.coin.indexOf(":") !== -1;
 
-    // Min 24h volume filter
-    if (config.minVolume > 0 && opp.volume < config.minVolume) {
+    // Min 24h volume filter (skip for builder dex)
+    if (!isBuilderDex && config.minVolume > 0 && opp.volume < config.minVolume) {
       result.skipped.push(opp.coin + ":low_volume($" + Math.round(opp.volume) + ")");
       journal.logAction("FILTER", opp.coin + " skipped — 24h volume $" + Math.round(opp.volume) + " < min $" + config.minVolume);
       continue;
     }
 
-    // Min open interest filter
-    if (config.minOI > 0 && opp.openInterest < config.minOI) {
+    // Min open interest filter (skip for builder dex)
+    if (!isBuilderDex && config.minOI > 0 && opp.openInterest < config.minOI) {
       result.skipped.push(opp.coin + ":low_oi($" + Math.round(opp.openInterest) + ")");
       journal.logAction("FILTER", opp.coin + " skipped — OI $" + Math.round(opp.openInterest) + " < min $" + config.minOI);
       continue;
@@ -1539,8 +1542,8 @@ async function scanForOpportunities(
     var lev = Math.min(config.leverage, opp.maxLev);
     var positionUSD = config.maxPositionUSD;
 
-    // Cap position size as % of token OI
-    if (config.maxOIPct > 0 && opp.openInterest > 0) {
+    // Cap position size as % of token OI (skip for builder dex — different liquidity)
+    if (!isBuilderDex && config.maxOIPct > 0 && opp.openInterest > 0) {
       var maxFromOI = (opp.openInterest * config.maxOIPct) / 100;
       if (maxFromOI < positionUSD) {
         journal.logAction("SIZE", opp.coin + " position capped $" + positionUSD + " → $" + maxFromOI.toFixed(0) + " (" + config.maxOIPct + "% of OI $" + Math.round(opp.openInterest) + ")");
