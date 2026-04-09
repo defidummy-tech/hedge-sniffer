@@ -2117,13 +2117,21 @@ export async function getAccountStatus(): Promise<{
     debug.sdkBaseUrl = (hl as any).baseUrl || "unknown";
 
     var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
-    var perpsBalance = parseFloat(state.marginSummary.accountValue);
-    debug.perpsBalance = perpsBalance;
-    debug.totalBalance = perpsBalance + spotBalance;
+    var perpsAccountValue = parseFloat(state.marginSummary.accountValue);
+    var perpsMarginUsed = parseFloat(state.marginSummary.totalMarginUsed);
+    debug.perpsAccountValue = perpsAccountValue;
+    debug.spotBalance = spotBalance;
+    // Unified account: spot USDC backs perps cross-margin.
+    // Total equity = spot balance + perps unrealized PnL (accountValue - abs(totalRawUsd))
+    // But simpler: just show spot + perps accountValue only if perps has its own deposits.
+    // In unified mode, perps accountValue = positions value, spot = collateral.
+    // Show spot as "balance" since that's the total collateral the user deposited.
+    var totalEquity = spotBalance > 0 ? spotBalance : perpsAccountValue;
+    debug.totalEquity = totalEquity;
 
     return {
-      balance: perpsBalance + spotBalance,
-      marginUsed: parseFloat(state.marginSummary.totalMarginUsed),
+      balance: totalEquity,
+      marginUsed: perpsMarginUsed,
       positions: state.assetPositions.map(function(p) {
         return {
           coin: p.position.coin,
@@ -2206,7 +2214,9 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
 
       result[coin] = {
         unrealizedPnl: parseFloat(pos.position.unrealizedPnl),
-        cumFunding: parseFloat(pos.position.cumFunding.sinceOpen),
+        // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid)
+        // We want positive = you earned
+        cumFunding: -parseFloat(pos.position.cumFunding.sinceOpen),
         midPrice: mids[coin] ? parseFloat(mids[coin]) : parseFloat(pos.position.entryPx),
       };
     }
