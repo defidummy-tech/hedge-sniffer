@@ -225,7 +225,7 @@ async function builderDexPlaceOrder(opts: {
     grouping: "na",
   };
 
-  var nonce = Date.now();
+  var nonce = Date.now() + 2000 + Math.floor(Math.random() * 1000);
   var signature = await signL1ActionRaw(wallet, action, nonce);
   var payload = { action: action, nonce: nonce, signature: signature, vaultAddress: null };
 
@@ -255,7 +255,8 @@ async function builderDexUpdateLeverage(coin: string, leverage: number): Promise
     leverage: leverage,
   };
 
-  var nonce = Date.now();
+  // Use unique nonce to avoid collisions with order placement
+  var nonce = Date.now() + Math.floor(Math.random() * 1000);
   var signature = await signL1ActionRaw(wallet, action, nonce);
   var payload = { action: action, nonce: nonce, signature: signature, vaultAddress: null };
 
@@ -265,9 +266,11 @@ async function builderDexUpdateLeverage(coin: string, leverage: number): Promise
     body: JSON.stringify(payload),
   });
   var json = await res.json();
-  journal.logAction("LEV", coin + " leverage response: " + JSON.stringify(json).slice(0, 200));
-  if (json && json.status === "err") {
-    throw new Error("Builder dex leverage failed: " + json.response);
+  journal.logAction("LEV", coin + " leverage response (HTTP " + res.status + "): " + JSON.stringify(json).slice(0, 300));
+
+  // If response is null or error, throw so the bot doesn't open a position with wrong leverage
+  if (!json || json.status === "err") {
+    throw new Error("Builder dex leverage failed: " + (json ? json.response : "null response"));
   }
   return json;
 }
