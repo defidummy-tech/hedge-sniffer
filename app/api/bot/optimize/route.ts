@@ -377,9 +377,32 @@ export async function GET() {
     }
 
     rec.reEntryCooldownHours = 2;
-    rec.entryWindowMinutes = 30;
     rec.minFundingPersistHours = 2;
-    explanations.push("30min entry window, 2h persistence check, 2h re-entry cooldown");
+
+    // Entry window: wider when few trades, tighten as data accumulates
+    if (closedTrades.length < 20) {
+      rec.entryWindowMinutes = 55;
+      explanations.push("55min entry window (wide — collecting trade data), 2h persistence check, 2h re-entry cooldown");
+    } else {
+      // Analyze if timing matters: do trades entered closer to settlement perform better?
+      var earlyEntries = closedTrades.filter(function(t) {
+        var minsBefore = 60 - (new Date(t.entryTime).getMinutes());
+        return minsBefore > 30;
+      });
+      var lateEntries = closedTrades.filter(function(t) {
+        var minsBefore = 60 - (new Date(t.entryTime).getMinutes());
+        return minsBefore <= 30;
+      });
+      var earlyAvg = earlyEntries.length > 0 ? earlyEntries.reduce(function(s, t) { return s + t.totalReturn; }, 0) / earlyEntries.length : 0;
+      var lateAvg = lateEntries.length > 0 ? lateEntries.reduce(function(s, t) { return s + t.totalReturn; }, 0) / lateEntries.length : 0;
+      if (lateAvg > earlyAvg * 1.5 && lateEntries.length >= 10) {
+        rec.entryWindowMinutes = 30;
+        explanations.push("30min entry window (late entries outperform), 2h persistence check, 2h re-entry cooldown");
+      } else {
+        rec.entryWindowMinutes = 55;
+        explanations.push("55min entry window, 2h persistence check, 2h re-entry cooldown");
+      }
+    }
 
     // ── Max volatility: data-driven from outsized losses ──
     // Analyze trades where loss exceeded 2x the normal stop — these are gap-through events

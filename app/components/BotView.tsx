@@ -248,15 +248,27 @@ export default function BotView() {
         // Auto-apply recommended params to config
         if (json.recommended) {
           var rec = json.recommended;
-          setConfig(function(c) {
-            var n: any = {};
-            for (var k in c) n[k] = (c as any)[k];
-            for (var k in rec) n[k] = rec[k];
-            return n;
-          });
-          // Count how many params changed
-          var changedCount = Object.keys(json.recommended).length;
-          setStatusMsg(changedCount + " params optimized — click Save to persist");
+          // Merge recommended into current config
+          var merged: any = {};
+          for (var ck in config) merged[ck] = (config as any)[ck];
+          for (var rk in rec) merged[rk] = rec[rk];
+          setConfig(merged);
+          // Auto-save to persist immediately
+          try {
+            var saveRes = await fetch("/api/bot/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(merged),
+            });
+            if (saveRes.ok) {
+              var changedCount = Object.keys(json.recommended).length;
+              setStatusMsg(changedCount + " params optimized & saved ✓");
+            } else {
+              setStatusMsg("Optimized but save failed — click Save manually");
+            }
+          } catch (e: any) {
+            setStatusMsg("Optimized but save failed — click Save manually");
+          }
           setTimeout(function() { setStatusMsg(null); }, 8000);
         }
       } else {
