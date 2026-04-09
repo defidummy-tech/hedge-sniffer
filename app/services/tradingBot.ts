@@ -245,11 +245,13 @@ async function builderDexUpdateLeverage(coin: string, leverage: number): Promise
   var wallet = new ethers.Wallet(key);
 
   var assetIndex = await getBuilderDexAssetIndex(coin);
+  journal.logAction("LEV", coin + " setting leverage " + leverage + "x (asset index: " + assetIndex + ")");
 
+  // Builder dex perps typically use isolated margin
   var action = {
     type: "updateLeverage",
     asset: assetIndex,
-    isCross: true,
+    isCross: false,
     leverage: leverage,
   };
 
@@ -263,7 +265,10 @@ async function builderDexUpdateLeverage(coin: string, leverage: number): Promise
     body: JSON.stringify(payload),
   });
   var json = await res.json();
-  if (!res.ok) throw new Error("Builder dex leverage failed: " + JSON.stringify(json));
+  journal.logAction("LEV", coin + " leverage response: " + JSON.stringify(json).slice(0, 200));
+  if (json && json.status === "err") {
+    throw new Error("Builder dex leverage failed: " + json.response);
+  }
   return json;
 }
 
