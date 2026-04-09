@@ -375,12 +375,23 @@ async function fetchBuilderDexFunding(coins: string[]): Promise<{ fundingMap: Re
   return { fundingMap: fundingMap, mids: mids };
 }
 
-// ── Fetch ALL live positions including builder dex positions ──
-// Returns a map of journalCoinName → position data
+// ── Fetch ALL live positions including builder dex positions (with cache) ──
+var _livePositionCache: {
+  coins: Set<string>;
+  positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }>;
+} | null = null;
+var _livePositionCacheTime = 0;
+var LIVE_POSITION_CACHE_TTL = 30000; // 30 seconds — avoid hammering HL API
+
 async function fetchAllLivePositions(walletAddr: string): Promise<{
   coins: Set<string>;
   positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }>;
 }> {
+  // Return cached result if fresh enough
+  if (_livePositionCache && Date.now() - _livePositionCacheTime < LIVE_POSITION_CACHE_TTL) {
+    return _livePositionCache;
+  }
+
   var coins = new Set<string>();
   var positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }> = [];
 
@@ -411,7 +422,7 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
     var dexes: Array<any> = await hlInfoPost({ type: "perpDexs" });
     if (Array.isArray(dexes)) {
       var validDexes = dexes.filter(function(d) { return d && d.name; });
-      journal.logAction("DEBUG", "Querying " + validDexes.length + " builder dexes for positions");
+      // Only log once per cache refresh, not every call
 
       var dexQueries = validDexes.map(async function(dex) {
           try {
@@ -465,7 +476,12 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
   journal.logAction("DEBUG", "fetchAllLivePositions: " + positions.length + " total positions, coins: " +
     Array.from(coins).join(", "));
 
-  return { coins: coins, positions: positions };
+  // Cache the result
+  var result = { coins: coins, positions: positions };
+  _livePositionCache = result;
+  _livePositionCacheTime = Date.now();
+
+  return result;
 }
 
 // ── Check if a coin is in stop-loss cooldown ──
@@ -2271,21 +2287,26 @@ export async function getAccountStatus(): Promise<{
     debug.spotError = e.message;
   }
 
+  // Use raw API (no SDK init needed — faster and more reliable)
   try {
-    var hl = await getSDK(config);
-    debug.sdkBaseUrl = (hl as any).baseUrl || "unknown";
+    var apiUrl = config.testnet
+      ? "https://api.hyperliquid-testnet.xyz/info"
+      : "https://api.hyperliquid.xyz/info";
 
-    var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
-    var perpsAccountValue = parseFloat(state.marginSummary.accountValue);
-    var perpsMarginUsed = parseFloat(state.marginSummary.totalMarginUsed);
+    var mainState = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "clearinghouseState", user: walletAddr }),
+    }).then(function(r) { return r.json(); });
+
+    var perpsAccountValue = parseFloat(mainState.marginSummary?.accountValue || "0");
+    var perpsMarginUsed = parseFloat(mainState.marginSummary?.totalMarginUsed || "0");
     debug.perpsAccountValue = perpsAccountValue;
     debug.spotBalance = spotBalance;
-    // Unified account: spot USDC backs perps cross-margin.
-    // Show spot as "balance" since that's the total collateral the user deposited.
     var totalEquity = spotBalance > 0 ? spotBalance : perpsAccountValue;
     debug.totalEquity = totalEquity;
 
-    // Fetch ALL positions including builder dex
+    // Fetch ALL positions including builder dex (uses 30s cache)
     var live = await fetchAllLivePositions(walletAddr);
     debug.totalPositions = live.positions.length;
 
@@ -2309,7 +2330,6 @@ export async function getAccountStatus(): Promise<{
     var errMsg = e.message || "Unknown error";
     journal.logAction("ERROR", "Account status: " + errMsg);
     debug.sdkError = errMsg;
-    // If perps SDK fails but we have spot balance, still show it
     return { balance: spotBalance, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg, debug: debug };
   }
 }
@@ -2362,11 +2382,11 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
 
   try {
     var walletAddr = getWalletAddress();
-    var hl = await getSDK(config);
 
-    // Fetch ALL live positions (main dex + builder dexes)
+    // Fetch ALL live positions (main dex + builder dexes) — uses 30s cache
     var live = await fetchAllLivePositions(walletAddr);
-    var mids: Record<string, string> = await hl.info.getAllMids();
+    // Use raw API for mids (no SDK init needed)
+    var mids: Record<string, string> = await hlInfoPost({ type: "allMids" });
 
     // Get open trades from journal so we can calculate PnL for builder dex trades
     var openTrades = await journal.getOpenTrades(false);
