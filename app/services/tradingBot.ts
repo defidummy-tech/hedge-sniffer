@@ -465,7 +465,7 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
         });
       }
     } catch (e: any) {
-      // Individual dex query failure is non-critical — skip silently
+      journal.logAction("WARN", "Builder dex " + dexName + " position query failed: " + e.message);
     }
   }
 
@@ -1462,28 +1462,30 @@ async function checkExistingPositions(
     positionMap[lp.coin] = lp;
   }
 
-  // Get current funding rates
-  var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+  // Get current funding rates (raw API — no SDK needed)
+  var metaCtx = await hlInfoPost({ type: "metaAndAssetCtxs" });
   var meta = metaCtx[0];
   var assetCtxs = metaCtx[1];
 
   // Build funding rate map
   var fundingMap: Record<string, number> = {};
-  meta.universe.forEach(function(u, i) {
+  meta.universe.forEach(function(u: any, i: number) {
     var ctx = assetCtxs[i];
     if (ctx && ctx.funding) {
       fundingMap[u.name] = parseFloat(ctx.funding) * 8760; // APR
     }
   });
 
+  // Get all mid prices ONCE (not per-trade)
+  var allMids: Record<string, string> = await hlInfoPost({ type: "allMids" });
+
   // Fetch builder-dex funding for any open trades on non-main dexes
   var builderDexCoins = openTrades.filter(function(t) { return t.coin.indexOf(":") !== -1; }).map(function(t) { return t.coin; });
-  var builderMids: Record<string, string> = {};
   if (builderDexCoins.length > 0) {
     try {
       var bdData = await fetchBuilderDexFunding(builderDexCoins);
       for (var bk in bdData.fundingMap) fundingMap[bk] = bdData.fundingMap[bk];
-      builderMids = bdData.mids;
+      for (var bmk in bdData.mids) allMids[bmk] = bdData.mids[bmk];
     } catch (e: any) { /* non-critical */ }
   }
 
@@ -1496,10 +1498,8 @@ async function checkExistingPositions(
       var pos = positionMap[trade.coin];
       var currentPrice = pos ? parseFloat(pos.entryPx) : trade.entryPrice; // fallback
 
-      // Get mid price for PnL calc (check builder dex mids too)
-      var mids = await hl.info.getAllMids();
-      for (var bmk in builderMids) mids[bmk] = builderMids[bmk];
-      var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
+      // Get mid price for PnL calc (using pre-fetched mids including builder dex)
+      var midPrice = allMids[trade.coin] ? parseFloat(allMids[trade.coin]) : trade.entryPrice;
 
       // Calculate unrealized PnL and funding
       var unrealizedPnl: number;
