@@ -346,6 +346,25 @@ export async function closeTrade(tradeId: string, exitPrice: number, exitFunding
   logAction("CLOSE", trade.coin + " " + exitReason + " PnL: $" + pnl.toFixed(2) + " Funding: $" + fundingEarned.toFixed(4));
 }
 
+// Re-open a trade that was incorrectly closed (e.g., phantom cleanup on builder dex)
+export async function reopenTrade(tradeId: string): Promise<boolean> {
+  await ensureInit();
+  var trades = await getAllTrades();
+  var trade = trades.find(function(t) { return t.id === tradeId; });
+  if (!trade) return false;
+  trade.exitPrice = null;
+  trade.exitTime = null;
+  trade.exitFundingAPR = null;
+  trade.exitReason = null;
+  trade.pnl = 0;
+  trade.fundingEarned = 0;
+  trade.totalReturn = 0;
+  trade.status = "open";
+  saveAndSync(TRADES_FILE, "hedge:trades", trades);
+  logAction("REOPEN", trade.coin + " re-opened (was incorrectly closed)");
+  return true;
+}
+
 export async function isAlreadyOpen(coin: string, paperFilter?: boolean): Promise<boolean> {
   var open = await getOpenTrades(paperFilter);
   return open.some(function(t) { return t.coin === coin; });

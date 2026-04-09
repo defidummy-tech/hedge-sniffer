@@ -375,6 +375,75 @@ async function fetchBuilderDexFunding(coins: string[]): Promise<{ fundingMap: Re
   return { fundingMap: fundingMap, mids: mids };
 }
 
+// ── Fetch ALL live positions including builder dex positions ──
+// Returns a map of journalCoinName → position data
+async function fetchAllLivePositions(walletAddr: string): Promise<{
+  coins: Set<string>;
+  positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }>;
+}> {
+  var coins = new Set<string>();
+  var positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }> = [];
+
+  // 1) Main dex positions (via raw API to avoid SDK issues)
+  try {
+    var mainState = await hlInfoPost({ type: "clearinghouseState", user: walletAddr });
+    if (mainState && Array.isArray(mainState.assetPositions)) {
+      for (var mp of mainState.assetPositions) {
+        if (parseFloat(mp.position.szi) === 0) continue;
+        var mainCoin = mp.position.coin;
+        coins.add(mainCoin);
+        positions.push({
+          coin: mainCoin,
+          szi: mp.position.szi,
+          entryPx: mp.position.entryPx,
+          unrealizedPnl: mp.position.unrealizedPnl,
+          leverage: mp.position.leverage ? mp.position.leverage.value : 1,
+          cumFunding: mp.position.cumFunding ? mp.position.cumFunding.sinceOpen : "0",
+        });
+      }
+    }
+  } catch (e: any) {
+    journal.logAction("WARN", "Failed to fetch main dex positions: " + e.message);
+  }
+
+  // 2) Builder dex positions
+  try {
+    var dexes: Array<{ name: string }> = await hlInfoPost({ type: "perpDexs" });
+    if (Array.isArray(dexes)) {
+      var dexQueries = dexes
+        .filter(function(d) { return d && d.name; })
+        .map(async function(dex) {
+          try {
+            var dexState = await hlInfoPost({ type: "clearinghouseState", user: walletAddr, dex: dex.name });
+            if (dexState && Array.isArray(dexState.assetPositions)) {
+              for (var dp of dexState.assetPositions) {
+                if (parseFloat(dp.position.szi) === 0) continue;
+                // Builder dex coin in our journal = dexName + ":" + position.coin
+                var fullCoin = dex.name + ":" + dp.position.coin;
+                coins.add(fullCoin);
+                positions.push({
+                  coin: fullCoin,
+                  szi: dp.position.szi,
+                  entryPx: dp.position.entryPx,
+                  unrealizedPnl: dp.position.unrealizedPnl,
+                  leverage: dp.position.leverage ? dp.position.leverage.value : 1,
+                  cumFunding: dp.position.cumFunding ? dp.position.cumFunding.sinceOpen : "0",
+                });
+              }
+            }
+          } catch (e: any) {
+            // Individual dex query failure is non-critical
+          }
+        });
+      await Promise.allSettled(dexQueries);
+    }
+  } catch (e: any) {
+    journal.logAction("WARN", "Failed to fetch builder dex positions: " + e.message);
+  }
+
+  return { coins: coins, positions: positions };
+}
+
 // ── Check if a coin is in stop-loss cooldown ──
 async function isInSLCooldown(coin: string, cooldownHours: number): Promise<boolean> {
   if (cooldownHours <= 0) return false;
@@ -722,20 +791,26 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
     var hl = await getSDK(config);
     var walletAddr = getWalletAddress();
 
-    // Get all live positions from Hyperliquid
-    var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
-    var livePositions = state.assetPositions.filter(function(p) {
-      return parseFloat(p.position.szi) !== 0;
-    });
+    // Get ALL live positions including builder dex
+    var live = await fetchAllLivePositions(walletAddr);
 
-    journal.logAction("KILL", "Found " + livePositions.length + " live position(s) to close");
+    journal.logAction("KILL", "Found " + live.positions.length + " live position(s) to close");
 
     // Get mid prices for manual close fallback
     var mids = await hl.info.getAllMids();
 
-    for (var pos of livePositions) {
-      var coin = pos.position.coin;
-      var szi = parseFloat(pos.position.szi);
+    // Also fetch builder-dex mids
+    var bdCoins = live.positions.filter(function(p) { return p.coin.indexOf(":") !== -1; }).map(function(p) { return p.coin; });
+    if (bdCoins.length > 0) {
+      try {
+        var bdMids = await fetchBuilderDexFunding(bdCoins);
+        for (var bmk in bdMids.mids) mids[bmk] = bdMids.mids[bmk];
+      } catch (e: any) { /* non-critical */ }
+    }
+
+    for (var pos of live.positions) {
+      var coin = pos.coin;
+      var szi = parseFloat(pos.szi);
       var closeSize = Math.abs(szi);
       var isBuy = szi < 0; // if short (negative size), buy to close
       var isBuilderDexCoin = coin.indexOf(":") !== -1;
@@ -871,21 +946,34 @@ async function recoverOrphanedPositions(hl: Hyperliquid, config: BotConfig): Pro
   var knownCoins = new Set(openTrades.map(function(t) { return t.coin; }));
 
   var walletAddr = getWalletAddress();
-  var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
 
-  var livePositions = state.assetPositions.filter(function(p) {
-    return parseFloat(p.position.szi) !== 0;
+  // Fetch ALL live positions including builder dex
+  var live = await fetchAllLivePositions(walletAddr);
+  var liveCoinsSet = live.coins;
+
+  // 1) Re-open phantom-closed trades that still have live positions
+  var allTrades = await journal.getAllTrades();
+  var phantomClosed = allTrades.filter(function(t) {
+    return t.status !== "open" && t.exitReason === "phantom" && liveCoinsSet.has(t.coin);
   });
+  for (var phantom of phantomClosed) {
+    var reopened = await journal.reopenTrade(phantom.id);
+    if (reopened) {
+      knownCoins.add(phantom.coin);
+      journal.logAction("RECOVER", "Re-opened phantom-closed " + phantom.coin + " — position still exists on exchange");
+    }
+  }
 
-  for (var pos of livePositions) {
-    var coin = pos.position.coin;
+  // 2) Recover truly orphaned positions (on exchange but not in journal at all)
+  for (var pos of live.positions) {
+    var coin = pos.coin;
     if (knownCoins.has(coin)) continue; // already tracked
 
     // This position exists on HL but not in our journal — recover it
-    var szi = parseFloat(pos.position.szi);
+    var szi = parseFloat(pos.szi);
     var direction: "long" | "short" = szi > 0 ? "long" : "short";
-    var entryPx = parseFloat(pos.position.entryPx);
-    var leverage = pos.position.leverage ? pos.position.leverage.value : config.leverage;
+    var entryPx = parseFloat(pos.entryPx);
+    var leverage = pos.leverage || config.leverage;
 
     var recoveredTrade: BotTrade = {
       id: genId(),
@@ -920,12 +1008,10 @@ async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
   if (openTrades.length === 0) return;
 
   var walletAddr = getWalletAddress();
-  var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
-  var liveCoins = new Set(
-    state.assetPositions
-      .filter(function(p) { return parseFloat(p.position.szi) !== 0; })
-      .map(function(p) { return p.position.coin; })
-  );
+
+  // Fetch ALL live positions including builder dex positions
+  var live = await fetchAllLivePositions(walletAddr);
+  var liveCoins = live.coins;
 
   for (var trade of openTrades) {
     if (liveCoins.has(trade.coin)) continue; // position exists on exchange — OK
@@ -1312,10 +1398,15 @@ async function checkExistingPositions(
   var openTrades = await journal.getOpenTrades();
   if (openTrades.length === 0) return;
 
-  // Get account state
+  // Get account state — ALL positions including builder dex
   var walletAddress = getWalletAddress();
 
-  var state = await hl.info.perpetuals.getClearinghouseState(walletAddress);
+  var live = await fetchAllLivePositions(walletAddress);
+  // Build a lookup map: coin → position data
+  var positionMap: Record<string, typeof live.positions[0]> = {};
+  for (var lp of live.positions) {
+    positionMap[lp.coin] = lp;
+  }
 
   // Get current funding rates
   var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
@@ -1347,12 +1438,12 @@ async function checkExistingPositions(
       var currentAPR = Math.abs(fundingMap[trade.coin] || 0);
       var holdHours = (Date.now() - trade.entryTime) / 3600000;
 
-      // Find current position
-      var pos = state.assetPositions.find(function(p) { return p.position.coin === trade.coin; });
-      var unrealizedPnl = pos ? parseFloat(pos.position.unrealizedPnl) : 0;
-      var currentPrice = pos ? parseFloat(pos.position.entryPx) : trade.entryPrice; // fallback
+      // Find current position from ALL positions (main + builder dex)
+      var pos = positionMap[trade.coin];
+      var unrealizedPnl = pos ? parseFloat(pos.unrealizedPnl) : 0;
+      var currentPrice = pos ? parseFloat(pos.entryPx) : trade.entryPrice; // fallback
       // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid, negative = you received)
-      var cumFunding = pos ? -parseFloat(pos.position.cumFunding.sinceOpen) : 0;
+      var cumFunding = pos ? -parseFloat(pos.cumFunding) : 0;
 
       // Get mid price for PnL calc (check builder dex mids too)
       var mids = await hl.info.getAllMids();
@@ -1444,7 +1535,7 @@ async function checkExistingPositions(
         try {
           if (isBuilderDexCoin) {
             // Builder dex: use raw API to close
-            var closeSzi = pos ? parseFloat(pos.position.szi) : 0;
+            var closeSzi = pos ? parseFloat(pos.szi) : 0;
             var closeSz = Math.abs(closeSzi);
             var closeIsBuy = closeSzi < 0;
             var closeLimitPx = roundPx(closeIsBuy ? midPrice * 1.05 : midPrice * 0.95);
@@ -1469,7 +1560,7 @@ async function checkExistingPositions(
 
           // Fallback: manual close
           try {
-            var closeSzi2 = pos ? parseFloat(pos.position.szi) : 0;
+            var closeSzi2 = pos ? parseFloat(pos.szi) : 0;
             var closeSz2 = Math.abs(closeSzi2);
             var closeIsBuy2 = closeSzi2 < 0;
             var closeLimitPx2 = roundPx(closeIsBuy2 ? midPrice * 1.05 : midPrice * 0.95);
@@ -2138,25 +2229,26 @@ export async function getAccountStatus(): Promise<{
     debug.perpsAccountValue = perpsAccountValue;
     debug.spotBalance = spotBalance;
     // Unified account: spot USDC backs perps cross-margin.
-    // Total equity = spot balance + perps unrealized PnL (accountValue - abs(totalRawUsd))
-    // But simpler: just show spot + perps accountValue only if perps has its own deposits.
-    // In unified mode, perps accountValue = positions value, spot = collateral.
     // Show spot as "balance" since that's the total collateral the user deposited.
     var totalEquity = spotBalance > 0 ? spotBalance : perpsAccountValue;
     debug.totalEquity = totalEquity;
 
+    // Fetch ALL positions including builder dex
+    var live = await fetchAllLivePositions(walletAddr);
+    debug.totalPositions = live.positions.length;
+
     return {
       balance: totalEquity,
       marginUsed: perpsMarginUsed,
-      positions: state.assetPositions.map(function(p) {
+      positions: live.positions.map(function(p) {
         return {
-          coin: p.position.coin,
-          size: p.position.szi,
-          entryPx: p.position.entryPx,
-          unrealizedPnl: p.position.unrealizedPnl,
-          leverage: p.position.leverage.value,
+          coin: p.coin,
+          size: p.szi,
+          entryPx: p.entryPx,
+          unrealizedPnl: p.unrealizedPnl,
+          leverage: p.leverage,
         };
-      }).filter(function(p) { return parseFloat(p.size) !== 0; }),
+      }),
       walletAddress: walletAddr,
       error: "",
       debug: debug,
@@ -2220,20 +2312,29 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
     var walletAddr = getWalletAddress();
     var hl = await getSDK(config);
 
-    var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
+    // Fetch ALL live positions (main dex + builder dexes)
+    var live = await fetchAllLivePositions(walletAddr);
     var mids = await hl.info.getAllMids();
 
-    for (var pos of state.assetPositions) {
-      var coin = pos.position.coin;
-      var size = parseFloat(pos.position.szi);
-      if (size === 0) continue;
+    // Also fetch builder-dex mids for builder dex positions
+    var builderCoins = live.positions
+      .filter(function(p) { return p.coin.indexOf(":") !== -1; })
+      .map(function(p) { return p.coin; });
+    if (builderCoins.length > 0) {
+      try {
+        var bdData = await fetchBuilderDexFunding(builderCoins);
+        for (var bk in bdData.mids) mids[bk] = bdData.mids[bk];
+      } catch (e: any) { /* non-critical */ }
+    }
 
+    for (var pos of live.positions) {
+      var coin = pos.coin;
       result[coin] = {
-        unrealizedPnl: parseFloat(pos.position.unrealizedPnl),
+        unrealizedPnl: parseFloat(pos.unrealizedPnl),
         // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid)
         // We want positive = you earned
-        cumFunding: -parseFloat(pos.position.cumFunding.sinceOpen),
-        midPrice: mids[coin] ? parseFloat(mids[coin]) : parseFloat(pos.position.entryPx),
+        cumFunding: -parseFloat(pos.cumFunding),
+        midPrice: mids[coin] ? parseFloat(mids[coin]) : parseFloat(pos.entryPx),
       };
     }
   } catch (e: any) {
