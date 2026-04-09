@@ -275,56 +275,64 @@ async function builderDexUpdateLeverage(coin: string, leverage: number): Promise
   return json;
 }
 
-// ── Discover all builder dexes and return their universe+funding ──
+// ── Discover all builder dexes and return their universe+funding (cached 60s) ──
+var _builderDexOppCache: Array<any> | null = null;
+var _builderDexOppCacheTime = 0;
+var BUILDER_DEX_OPP_CACHE_TTL = 60000; // 60 seconds
+
 async function fetchBuilderDexOpportunities(): Promise<Array<{
   coin: string; dex: string; fundingRate: number; fundingAPR: number;
   midPrice: number; maxLev: number; szDecimals: number; volume: number; openInterest: number;
 }>> {
+  // Return cached result if fresh
+  if (_builderDexOppCache && Date.now() - _builderDexOppCacheTime < BUILDER_DEX_OPP_CACHE_TTL) {
+    return _builderDexOppCache;
+  }
+
   var results: Array<{
     coin: string; dex: string; fundingRate: number; fundingAPR: number;
     midPrice: number; maxLev: number; szDecimals: number; volume: number; openInterest: number;
   }> = [];
 
   try {
-    var dexes: Array<{ name: string }> = await hlInfoPost({ type: "perpDexs" });
-    if (!Array.isArray(dexes) || dexes.length === 0) return results;
+    // Only query known builder dexes instead of fetching the full perpDexs list
+    var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "cash", "para"];
 
-    var dexResults = await Promise.allSettled(
-      dexes.map(async function(dex) {
-        var dexMeta = await hlInfoPost({ type: "metaAndAssetCtxs", dex: dex.name });
-        return { dexName: dex.name, meta: dexMeta[0], ctxs: dexMeta[1] };
-      })
-    );
+    for (var di = 0; di < KNOWN_BUILDER_DEXES.length; di++) {
+      var dexName = KNOWN_BUILDER_DEXES[di];
+      try {
+        var dexMeta = await hlInfoPost({ type: "metaAndAssetCtxs", dex: dexName });
+        if (!dexMeta || !dexMeta[0] || !dexMeta[0].universe) continue;
 
-    for (var dr of dexResults) {
-      if (dr.status !== "fulfilled") continue;
-      var dexData = dr.value;
-      if (!dexData.meta || !dexData.meta.universe) continue;
-
-      dexData.meta.universe.forEach(function(u: any, i: number) {
-        var ctx = dexData.ctxs[i];
-        if (!ctx) return;
-        var rate = parseFloat(ctx.funding || "0");
-        var mid = parseFloat(ctx.midPx || ctx.markPx || "0");
-        if (mid <= 0) return;
-        var fullCoin = dexData.dexName + ":" + u.name;
-        results.push({
-          coin: fullCoin,
-          dex: dexData.dexName,
-          fundingRate: rate,
-          fundingAPR: rate * 8760,
-          midPrice: mid,
-          maxLev: u.maxLeverage || 3,
-          szDecimals: u.szDecimals || 0,
-          volume: parseFloat(ctx.dayNtlVlm || "0"),
-          openInterest: parseFloat(ctx.openInterest || "0"),
+        dexMeta[0].universe.forEach(function(u: any, i: number) {
+          var ctx = dexMeta[1][i];
+          if (!ctx) return;
+          var rate = parseFloat(ctx.funding || "0");
+          var mid = parseFloat(ctx.midPx || ctx.markPx || "0");
+          if (mid <= 0) return;
+          var fullCoin = dexName + ":" + u.name;
+          results.push({
+            coin: fullCoin,
+            dex: dexName,
+            fundingRate: rate,
+            fundingAPR: rate * 8760,
+            midPrice: mid,
+            maxLev: u.maxLeverage || 3,
+            szDecimals: u.szDecimals || 0,
+            volume: parseFloat(ctx.dayNtlVlm || "0"),
+            openInterest: parseFloat(ctx.openInterest || "0"),
+          });
         });
-      });
+      } catch (e: any) {
+        // Individual dex failed — skip
+      }
     }
   } catch (e: any) {
     // Non-critical: builder dex discovery failed, main dex still works
   }
 
+  _builderDexOppCache = results;
+  _builderDexOppCacheTime = Date.now();
   return results;
 }
 
@@ -2231,6 +2239,11 @@ async function scanForOpportunities(
 }
 
 // ── Get account status ──
+// ── Account status cache (15s) — avoids redundant API calls on dashboard refresh ──
+var _accountStatusCache: any = null;
+var _accountStatusCacheTime = 0;
+var ACCOUNT_STATUS_CACHE_TTL = 15000;
+
 export async function getAccountStatus(): Promise<{
   balance: number;
   marginUsed: number;
@@ -2239,6 +2252,11 @@ export async function getAccountStatus(): Promise<{
   error: string;
   debug: Record<string, any>;
 }> {
+  // Return cached if fresh
+  if (_accountStatusCache && Date.now() - _accountStatusCacheTime < ACCOUNT_STATUS_CACHE_TTL) {
+    return _accountStatusCache;
+  }
+
   var config = await journal.getConfig();
 
   // Paper mode: return simulated account from journal data
@@ -2302,7 +2320,7 @@ export async function getAccountStatus(): Promise<{
     var live = await fetchAllLivePositions(walletAddr);
     debug.totalPositions = live.positions.length;
 
-    return {
+    var statusResult = {
       balance: totalEquity,
       marginUsed: perpsMarginUsed,
       positions: live.positions.map(function(p) {
@@ -2318,6 +2336,9 @@ export async function getAccountStatus(): Promise<{
       error: "",
       debug: debug,
     };
+    _accountStatusCache = statusResult;
+    _accountStatusCacheTime = Date.now();
+    return statusResult;
   } catch (e: any) {
     var errMsg = e.message || "Unknown error";
     journal.logAction("ERROR", "Account status: " + errMsg);
@@ -2361,8 +2382,18 @@ async function getPaperAccountStatus(config: BotConfig): Promise<{
   };
 }
 
-// ── Get live position P&L details (for kill switch) ──
+// ── Get live position P&L details (for kill switch + dashboard) ──
+// Cached for 15s to avoid redundant API calls.
+var _positionDetailsCache: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> | null = null;
+var _positionDetailsCacheTime = 0;
+var POSITION_DETAILS_CACHE_TTL = 15000;
+
 export async function getPositionDetails(): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
+  // Return cached if fresh
+  if (_positionDetailsCache && Date.now() - _positionDetailsCacheTime < POSITION_DETAILS_CACHE_TTL) {
+    return _positionDetailsCache;
+  }
+
   var config = await journal.getConfig();
 
   // Paper mode: calculate from journal trades + mainnet prices
@@ -2433,6 +2464,8 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
     journal.logAction("ERROR", "getPositionDetails: " + e.message);
   }
 
+  _positionDetailsCache = result;
+  _positionDetailsCacheTime = Date.now();
   return result;
 }
 
@@ -2441,8 +2474,8 @@ async function getPaperPositionDetails(): Promise<Record<string, { unrealizedPnl
   var result: Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }> = {};
 
   try {
-    var hl = await getMainnetSDK();
-    var mids = await hl.info.getAllMids();
+    // Use raw fetch instead of SDK (avoids websocket init)
+    var mids: Record<string, string> = await hlInfoPost({ type: "allMids" });
     var openTrades = await journal.getOpenTrades(true);
 
     // Fetch builder-dex mids for any paper trades on non-main dexes
@@ -2476,13 +2509,22 @@ async function getPaperPositionDetails(): Promise<Record<string, { unrealizedPnl
 }
 
 // ── Get current funding rates for all perps (including builder dexes) ──
+// Cached for 30s to avoid excessive API calls on dashboard refresh.
+var _fundingRatesCache: Record<string, number> | null = null;
+var _fundingRatesCacheTime = 0;
+var FUNDING_RATES_CACHE_TTL = 30000;
+
 export async function getFundingRates(): Promise<Record<string, number>> {
-  var config = await journal.getConfig();
+  // Return cached if fresh
+  if (_fundingRatesCache && Date.now() - _fundingRatesCacheTime < FUNDING_RATES_CACHE_TTL) {
+    return _fundingRatesCache;
+  }
+
   var rates: Record<string, number> = {};
 
   try {
-    var hl = await getReadSDK(config);
-    var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+    // Use raw fetch instead of SDK (avoids websocket init)
+    var metaCtx = await hlInfoPost({ type: "metaAndAssetCtxs" });
     var meta = metaCtx[0];
     var assetCtxs = metaCtx[1];
 
@@ -2493,7 +2535,7 @@ export async function getFundingRates(): Promise<Record<string, number>> {
       }
     });
 
-    // Also fetch builder-dex funding rates
+    // Also fetch builder-dex funding rates (uses its own 60s cache)
     try {
       var builderAssets = await fetchBuilderDexOpportunities();
       for (var ba of builderAssets) {
@@ -2504,5 +2546,7 @@ export async function getFundingRates(): Promise<Record<string, number>> {
     journal.logAction("ERROR", "getFundingRates: " + e.message);
   }
 
+  _fundingRatesCache = rates;
+  _fundingRatesCacheTime = Date.now();
   return rates;
 }

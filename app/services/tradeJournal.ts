@@ -101,12 +101,11 @@ async function doInit(): Promise<void> {
 }
 
 // ── Default config ──
-// SAFETY: enabled always defaults to false. The bot can only be enabled
-// through the UI (saved to Redis), never through env vars alone.
-// This prevents the bot from auto-enabling on cold boot if Redis fails.
+// enabled defaults to env var BOT_ENABLED (false if unset).
+// testnet defaults to env var BOT_TESTNET (false if unset).
 function defaultConfig(): BotConfig {
   return {
-    enabled: false, // ALWAYS false by default — must be enabled via UI
+    enabled: parseBool(process.env.BOT_ENABLED, false),
     testnet: parseBool(process.env.BOT_TESTNET, false),
     entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "0.5"),
     exitAPR: parseFloat(process.env.BOT_EXIT_APR || "0.5"),
@@ -187,6 +186,18 @@ function mergeWithDefaults(saved: any): BotConfig {
       merged[k] = (defaults as any)[k];
     }
   }
+  // ── Env var overrides for critical settings ──
+  // testnet MUST always match the env var — a stale Redis value pointing to
+  // testnet while the env says mainnet (or vice versa) is dangerous.
+  if (process.env.BOT_TESTNET !== undefined) {
+    merged.testnet = parseBool(process.env.BOT_TESTNET, false);
+  }
+  // enabled: env var override so Render BOT_ENABLED=true actually works
+  // after a redeploy wipes the local config and Redis has stale data.
+  if (process.env.BOT_ENABLED !== undefined) {
+    merged.enabled = parseBool(process.env.BOT_ENABLED, false);
+  }
+
   // ── Config migrations ──
   // v1: entryAPR was set too high (18+), migrate down to 1.0 (100%)
   if (merged.entryAPR >= 18) {
