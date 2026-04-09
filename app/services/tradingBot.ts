@@ -417,76 +417,48 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
     journal.logAction("WARN", "Failed to fetch main dex positions: " + e.message);
   }
 
-  // 2) Builder dex positions — only query dexes that have open journal trades
-  //    (avoids querying all 8+ dexes unnecessarily)
-  try {
-    var openTrades = await journal.getOpenTrades(false);
-    var dexesNeeded = new Set<string>();
-    for (var ot of openTrades) {
-      var colonIdx = ot.coin.indexOf(":");
-      if (colonIdx !== -1) {
-        dexesNeeded.add(ot.coin.substring(0, colonIdx));
+  // 2) Builder dex positions — query ALL known dexes (needed for recovery after redeploy)
+  //    The 30s cache prevents excessive API calls on repeated dashboard refreshes.
+  var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "cash", "para"];
+  for (var di = 0; di < KNOWN_BUILDER_DEXES.length; di++) {
+    var dexName = KNOWN_BUILDER_DEXES[di];
+    try {
+      var dexRes = await fetch(HL_INFO_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "clearinghouseState", user: walletAddr, dex: dexName }),
+      });
+
+      if (!dexRes.ok) {
+        journal.logAction("WARN", "Dex " + dexName + " API returned " + dexRes.status);
+        continue;
       }
-    }
 
-    if (dexesNeeded.size > 0) {
-      var dexList = Array.from(dexesNeeded);
-      journal.logAction("DEBUG", "Querying builder dex positions for: " + dexList.join(", "));
+      var dexState = await dexRes.json();
+      if (!dexState || !Array.isArray(dexState.assetPositions)) continue;
 
-      // Query each dex sequentially (more reliable than concurrent)
-      for (var di = 0; di < dexList.length; di++) {
-        var dexName = dexList[di];
-        try {
-          var dexRes = await fetch(HL_INFO_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "clearinghouseState", user: walletAddr, dex: dexName }),
-          });
-          journal.logAction("DEBUG", "Dex " + dexName + " clearinghouseState HTTP " + dexRes.status);
-
-          if (!dexRes.ok) {
-            journal.logAction("WARN", "Dex " + dexName + " API returned " + dexRes.status);
-            continue;
-          }
-
-          var dexState = await dexRes.json();
-          var dexAssetPositions = dexState && dexState.assetPositions;
-          if (!Array.isArray(dexAssetPositions)) {
-            journal.logAction("WARN", "Dex " + dexName + " no assetPositions in response, keys: " +
-              (dexState ? Object.keys(dexState).join(",") : "null"));
-            continue;
-          }
-
-          var dexPositions = dexAssetPositions.filter(function(p: any) {
-            return parseFloat(p.position.szi) !== 0;
-          });
-          journal.logAction("DEBUG", "Dex " + dexName + ": " + dexPositions.length + " open position(s) of " + dexAssetPositions.length + " total");
-
-          for (var dp of dexPositions) {
-            var apiCoin = dp.position.coin; // e.g., "xyz:CL" or "CL"
-            var fullCoin: string;
-            if (apiCoin.indexOf(":") !== -1) {
-              fullCoin = dexName + ":" + apiCoin; // "xyz" + ":" + "xyz:CL" = "xyz:xyz:CL"
-            } else {
-              fullCoin = dexName + ":" + dexName + ":" + apiCoin; // "xyz" + ":" + "xyz" + ":" + "CL"
-            }
-            coins.add(fullCoin);
-            positions.push({
-              coin: fullCoin,
-              szi: dp.position.szi,
-              entryPx: dp.position.entryPx,
-              unrealizedPnl: dp.position.unrealizedPnl,
-              leverage: dp.position.leverage ? dp.position.leverage.value : 1,
-              cumFunding: dp.position.cumFunding ? dp.position.cumFunding.sinceOpen : "0",
-            });
-          }
-        } catch (e: any) {
-          journal.logAction("WARN", "Builder dex " + dexName + " query failed: " + e.message);
+      for (var dp of dexState.assetPositions) {
+        if (parseFloat(dp.position.szi) === 0) continue;
+        var apiCoin = dp.position.coin; // e.g., "xyz:CL" or "CL"
+        var fullCoin: string;
+        if (apiCoin.indexOf(":") !== -1) {
+          fullCoin = dexName + ":" + apiCoin; // "xyz" + ":" + "xyz:CL" = "xyz:xyz:CL"
+        } else {
+          fullCoin = dexName + ":" + dexName + ":" + apiCoin; // "xyz" + ":" + "xyz" + ":" + "CL"
         }
+        coins.add(fullCoin);
+        positions.push({
+          coin: fullCoin,
+          szi: dp.position.szi,
+          entryPx: dp.position.entryPx,
+          unrealizedPnl: dp.position.unrealizedPnl,
+          leverage: dp.position.leverage ? dp.position.leverage.value : 1,
+          cumFunding: dp.position.cumFunding ? dp.position.cumFunding.sinceOpen : "0",
+        });
       }
+    } catch (e: any) {
+      // Individual dex query failure is non-critical — skip silently
     }
-  } catch (e: any) {
-    journal.logAction("WARN", "Builder dex position fetch error: " + e.message);
   }
 
   journal.logAction("DEBUG", "fetchAllLivePositions: " + positions.length + " total positions, coins: " +
