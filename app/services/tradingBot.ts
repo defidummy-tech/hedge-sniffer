@@ -39,13 +39,21 @@ function getWalletAddress(): string {
   return cachedWalletAddress;
 }
 
-// ── SDK singleton (lazy init) ──
+// ── SDK singleton (lazy init, re-creates if testnet setting changes) ──
 var sdk: Hyperliquid | null = null;
 var sdkReady = false;
+var sdkTestnet: boolean | null = null;
 
 async function getSDK(config: BotConfig): Promise<Hyperliquid> {
   var key = getPrivateKey();
   if (!key) throw new Error("No private key found (checked HYPERLIQUID_PRIVATE_KEY env var and /etc/secrets/hyperliquid_key.txt)");
+
+  // Re-create SDK if testnet setting changed
+  if (sdk && sdkTestnet !== null && sdkTestnet !== config.testnet) {
+    journal.logAction("SDK", "Testnet changed " + sdkTestnet + " → " + config.testnet + " — re-initializing SDK");
+    sdk = null;
+    sdkReady = false;
+  }
 
   if (!sdk) {
     sdk = new Hyperliquid({
@@ -55,6 +63,7 @@ async function getSDK(config: BotConfig): Promise<Hyperliquid> {
     });
     await sdk.connect();
     sdkReady = true;
+    sdkTestnet = config.testnet;
   }
   return sdk;
 }
