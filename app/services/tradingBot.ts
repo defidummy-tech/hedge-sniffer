@@ -3,6 +3,7 @@
 
 import { Hyperliquid } from "hyperliquid";
 import { ethers } from "ethers";
+import { encode } from "@msgpack/msgpack";
 import { readFileSync } from "fs";
 import type { BotTrade, BotConfig } from "../types";
 import * as journal from "./tradeJournal";
@@ -112,6 +113,158 @@ async function hlInfoPost(body: any): Promise<any> {
   });
   if (!res.ok) throw new Error("HL API " + res.status);
   return res.json();
+}
+
+// ── Builder dex asset index resolution ──
+// Asset ID = 100000 + perp_dex_index * 10000 + index_in_meta
+// See: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids
+var builderDexIndexCache: Record<string, number> | null = null;
+var builderDexCacheTime = 0;
+var BUILDER_DEX_CACHE_TTL = 3600000; // 1 hour
+
+async function getBuilderDexAssetIndex(coin: string): Promise<number> {
+  // coin format: "xyz:xyz:CL" → dex="xyz", internal name in universe="xyz:CL"
+  // or "flx:flx:OIL" → dex="flx", internal name="flx:OIL"
+  var now = Date.now();
+  if (!builderDexIndexCache || now - builderDexCacheTime > BUILDER_DEX_CACHE_TTL) {
+    builderDexIndexCache = {};
+    builderDexCacheTime = now;
+    try {
+      var dexes: Array<any> = await hlInfoPost({ type: "perpDexs" });
+      for (var dexIdx = 0; dexIdx < dexes.length; dexIdx++) {
+        var dex = dexes[dexIdx];
+        if (!dex || !dex.name) continue; // index 0 is null (main dex)
+        try {
+          var dexMeta = await hlInfoPost({ type: "meta", dex: dex.name });
+          if (dexMeta && dexMeta.universe) {
+            dexMeta.universe.forEach(function(u: any, assetIdx: number) {
+              // u.name is like "xyz:CL", full coin key is "xyz:xyz:CL"
+              var fullKey = dex.name + ":" + u.name;
+              builderDexIndexCache![fullKey] = 100000 + dexIdx * 10000 + assetIdx;
+            });
+          }
+        } catch (e: any) {
+          // skip failed dex
+        }
+      }
+      journal.logAction("CACHE", "Builder dex index cache loaded: " + Object.keys(builderDexIndexCache).length + " assets");
+    } catch (e: any) {
+      journal.logAction("ERROR", "Builder dex index cache failed: " + e.message);
+    }
+  }
+  var idx = builderDexIndexCache[coin];
+  if (idx === undefined) throw new Error("Builder dex asset not found: " + coin);
+  return idx;
+}
+
+// ── Raw signed order placement for builder dex coins ──
+// The SDK doesn't support builder dex asset indices, so we bypass it entirely.
+var HL_EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange";
+
+function floatToWire(x: number): string {
+  var s = x.toPrecision(5);
+  // Remove trailing zeros after decimal
+  if (s.indexOf(".") !== -1) {
+    s = s.replace(/0+$/, "").replace(/\.$/, "");
+  }
+  return s;
+}
+
+function actionHash(action: any, vaultAddress: string | null, nonce: number): Uint8Array {
+  var msgPackBytes = encode(action);
+  var additionalBytesLength = vaultAddress === null ? 9 : 29;
+  var data = new Uint8Array(msgPackBytes.length + additionalBytesLength);
+  data.set(msgPackBytes);
+  var view = new DataView(data.buffer);
+  view.setBigUint64(msgPackBytes.length, BigInt(nonce), false);
+  if (vaultAddress === null) {
+    view.setUint8(msgPackBytes.length + 8, 0);
+  } else {
+    view.setUint8(msgPackBytes.length + 8, 1);
+    data.set(ethers.getBytes(vaultAddress), msgPackBytes.length + 9);
+  }
+  return ethers.getBytes(ethers.keccak256(data));
+}
+
+async function signL1ActionRaw(wallet: ethers.Wallet, action: any, nonce: number): Promise<{ r: string; s: string; v: number }> {
+  var hash = actionHash(action, null, nonce);
+  var phantomAgent = { source: "a", connectionId: ethers.hexlify(hash) };
+  var domain = { name: "Exchange", version: "1", chainId: 1337, verifyingContract: "0x0000000000000000000000000000000000000000" };
+  var types = { Agent: [{ name: "source", type: "string" }, { name: "connectionId", type: "bytes32" }] };
+  var sig = await wallet.signTypedData(domain, types, phantomAgent);
+  var split = ethers.Signature.from(sig);
+  return { r: split.r, s: split.s, v: split.v };
+}
+
+async function builderDexPlaceOrder(opts: {
+  coin: string;      // full coin like "xyz:xyz:CL"
+  isBuy: boolean;
+  size: number;
+  price: number;
+  reduceOnly: boolean;
+  szDecimals: number;
+}): Promise<any> {
+  var key = getPrivateKey();
+  if (!key) throw new Error("No private key for builder dex order");
+  var wallet = new ethers.Wallet(key);
+
+  var assetIndex = await getBuilderDexAssetIndex(opts.coin);
+
+  var orderWire = {
+    a: assetIndex,
+    b: opts.isBuy,
+    p: floatToWire(opts.price),
+    s: floatToWire(opts.size),
+    r: opts.reduceOnly,
+    t: { limit: { tif: "Ioc" } },
+  };
+
+  var action = {
+    type: "order",
+    orders: [orderWire],
+    grouping: "na",
+  };
+
+  var nonce = Date.now();
+  var signature = await signL1ActionRaw(wallet, action, nonce);
+  var payload = { action: action, nonce: nonce, signature: signature, vaultAddress: null };
+
+  var res = await fetch(HL_EXCHANGE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  var json = await res.json();
+  if (!res.ok) throw new Error("Builder dex order failed: " + JSON.stringify(json));
+  return json;
+}
+
+async function builderDexUpdateLeverage(coin: string, leverage: number): Promise<any> {
+  var key = getPrivateKey();
+  if (!key) throw new Error("No private key for builder dex leverage");
+  var wallet = new ethers.Wallet(key);
+
+  var assetIndex = await getBuilderDexAssetIndex(coin);
+
+  var action = {
+    type: "updateLeverage",
+    asset: assetIndex,
+    isCross: true,
+    leverage: leverage,
+  };
+
+  var nonce = Date.now();
+  var signature = await signL1ActionRaw(wallet, action, nonce);
+  var payload = { action: action, nonce: nonce, signature: signature, vaultAddress: null };
+
+  var res = await fetch(HL_EXCHANGE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  var json = await res.json();
+  if (!res.ok) throw new Error("Builder dex leverage failed: " + JSON.stringify(json));
+  return json;
 }
 
 // ── Discover all builder dexes and return their universe+funding ──
@@ -576,12 +729,30 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
       var szi = parseFloat(pos.position.szi);
       var closeSize = Math.abs(szi);
       var isBuy = szi < 0; // if short (negative size), buy to close
+      var isBuilderDexCoin = coin.indexOf(":") !== -1;
       try {
-        await hl.custom.marketClose(coin);
-        closed.push(coin);
-        journal.logAction("KILL", "Closed " + coin);
+        if (isBuilderDexCoin) {
+          // Builder dex: use raw API to close
+          var bdMidPrice = parseFloat(mids[coin] || "0");
+          if (bdMidPrice <= 0) throw new Error("No mid price for builder dex coin " + coin);
+          var bdLimitPrice = roundPx(isBuy ? bdMidPrice * 1.05 : bdMidPrice * 0.95);
+          await builderDexPlaceOrder({
+            coin: coin,
+            isBuy: isBuy,
+            size: closeSize,
+            price: bdLimitPrice,
+            reduceOnly: true,
+            szDecimals: 4,
+          });
+          closed.push(coin);
+          journal.logAction("KILL", "Closed " + coin + " (builder dex)");
+        } else {
+          await hl.custom.marketClose(coin);
+          closed.push(coin);
+          journal.logAction("KILL", "Closed " + coin);
+        }
       } catch (e: any) {
-        journal.logAction("WARN", "marketClose " + coin + " failed: " + e.message + " — trying manual close");
+        journal.logAction("WARN", "Close " + coin + " failed: " + e.message + " — trying manual close");
 
         // Fallback: manual close using exchange.placeOrder directly
         // This bypasses the SDK's internal symbol matching which can fail for some coins (e.g. ETH)
@@ -591,14 +762,25 @@ export async function closeAllPositions(): Promise<{ closed: string[]; errors: s
 
           var limitPrice = roundPx(isBuy ? midPrice * 1.05 : midPrice * 0.95);
 
-          await hl.exchange.placeOrder({
-            coin: toPerpCoin(coin),
-            is_buy: isBuy,
-            sz: closeSize,
-            limit_px: limitPrice,
-            order_type: { limit: { tif: "Ioc" as any } },
-            reduce_only: true,
-          });
+          if (isBuilderDexCoin) {
+            await builderDexPlaceOrder({
+              coin: coin,
+              isBuy: isBuy,
+              size: closeSize,
+              price: limitPrice,
+              reduceOnly: true,
+              szDecimals: 4,
+            });
+          } else {
+            await hl.exchange.placeOrder({
+              coin: toPerpCoin(coin),
+              is_buy: isBuy,
+              sz: closeSize,
+              limit_px: limitPrice,
+              order_type: { limit: { tif: "Ioc" as any } },
+              reduce_only: true,
+            });
+          }
 
           closed.push(coin);
           journal.logAction("KILL", "Closed " + coin + " (manual fallback)");
@@ -1252,31 +1434,57 @@ async function checkExistingPositions(
         var isBuilderDexCoin = trade.coin.indexOf(":") !== -1;
         try {
           if (isBuilderDexCoin) {
-            throw new Error("builder-dex — use direct placeOrder");
-          }
-          await hl.custom.marketClose(trade.coin);
-          closedOk = true;
-        } catch (e: any) {
-          if (!isBuilderDexCoin) {
-            journal.logAction("WARN", "marketClose " + trade.coin + " failed: " + e.message + " — trying manual close");
-          }
-
-          // Fallback: manual close using exchange.placeOrder directly
-          try {
+            // Builder dex: use raw API to close
             var closeSzi = pos ? parseFloat(pos.position.szi) : 0;
             var closeSz = Math.abs(closeSzi);
             var closeIsBuy = closeSzi < 0;
             var closeLimitPx = roundPx(closeIsBuy ? midPrice * 1.05 : midPrice * 0.95);
-
             if (closeSz > 0) {
-              await hl.exchange.placeOrder({
-                coin: toPerpCoin(trade.coin),
-                is_buy: closeIsBuy,
-                sz: closeSz,
-                limit_px: closeLimitPx,
-                order_type: { limit: { tif: "Ioc" as any } },
-                reduce_only: true,
+              await builderDexPlaceOrder({
+                coin: trade.coin,
+                isBuy: closeIsBuy,
+                size: closeSz,
+                price: closeLimitPx,
+                reduceOnly: true,
+                szDecimals: 4,
               });
+              closedOk = true;
+              journal.logAction("CLOSE", trade.coin + " closed via builder dex API");
+            }
+          } else {
+            await hl.custom.marketClose(trade.coin);
+            closedOk = true;
+          }
+        } catch (e: any) {
+          journal.logAction("WARN", "Close " + trade.coin + " failed: " + e.message + " — trying manual close");
+
+          // Fallback: manual close
+          try {
+            var closeSzi2 = pos ? parseFloat(pos.position.szi) : 0;
+            var closeSz2 = Math.abs(closeSzi2);
+            var closeIsBuy2 = closeSzi2 < 0;
+            var closeLimitPx2 = roundPx(closeIsBuy2 ? midPrice * 1.05 : midPrice * 0.95);
+
+            if (closeSz2 > 0) {
+              if (isBuilderDexCoin) {
+                await builderDexPlaceOrder({
+                  coin: trade.coin,
+                  isBuy: closeIsBuy2,
+                  size: closeSz2,
+                  price: closeLimitPx2,
+                  reduceOnly: true,
+                  szDecimals: 4,
+                });
+              } else {
+                await hl.exchange.placeOrder({
+                  coin: toPerpCoin(trade.coin),
+                  is_buy: closeIsBuy2,
+                  sz: closeSz2,
+                  limit_px: closeLimitPx2,
+                  order_type: { limit: { tif: "Ioc" as any } },
+                  reduce_only: true,
+                });
+              }
               closedOk = true;
               journal.logAction("CLOSE", trade.coin + " closed via manual fallback");
             }
@@ -1663,22 +1871,29 @@ async function scanForOpportunities(
       // ── Real mode: place actual orders on exchange ──
       try {
         // Set leverage
-        await hl.exchange.updateLeverage(opp.coin, "cross", lev);
-
-        // Place market order (use direct placeOrder for builder-dex coins)
         var isBuy = opp.direction === "long";
         var isBuilderDex = opp.coin.indexOf(":") !== -1;
+
+        if (isBuilderDex) {
+          // Builder dex: use raw API (SDK doesn't support builder dex asset indices)
+          await builderDexUpdateLeverage(opp.coin, lev);
+        } else {
+          await hl.exchange.updateLeverage(opp.coin, "cross", lev);
+        }
+
+        // Place market order
         var orderResult: any;
 
         if (isBuilderDex) {
+          // Builder dex: use raw signed API with correct asset index
           var limitPx = roundPx(isBuy ? opp.midPrice * 1.05 : opp.midPrice * 0.95);
-          orderResult = await hl.exchange.placeOrder({
-            coin: toPerpCoin(opp.coin),
-            is_buy: isBuy,
-            sz: size,
-            limit_px: limitPx,
-            order_type: { limit: { tif: "Ioc" as any } },
-            reduce_only: false,
+          orderResult = await builderDexPlaceOrder({
+            coin: opp.coin,
+            isBuy: isBuy,
+            size: size,
+            price: limitPx,
+            reduceOnly: false,
+            szDecimals: opp.szDecimals,
           });
         } else {
           orderResult = await hl.custom.marketOpen(opp.coin, isBuy, size);
