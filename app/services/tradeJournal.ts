@@ -107,7 +107,7 @@ async function doInit(): Promise<void> {
 function defaultConfig(): BotConfig {
   return {
     enabled: false, // ALWAYS false by default — must be enabled via UI
-    testnet: parseBool(process.env.BOT_TESTNET, true),
+    testnet: parseBool(process.env.BOT_TESTNET, false),
     entryAPR: parseFloat(process.env.BOT_ENTRY_APR || "0.5"),
     exitAPR: parseFloat(process.env.BOT_EXIT_APR || "0.5"),
     maxPositionUSD: parseFloat(process.env.BOT_MAX_POSITION || "100"),

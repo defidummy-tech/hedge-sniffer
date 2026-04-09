@@ -92,6 +92,7 @@ function toPerpCoin(coin: string): string {
 }
 
 // ── Raw Hyperliquid info API helper (for multi-dex queries the SDK doesn't support) ──
+// Builder dexes only exist on mainnet, so always use mainnet endpoint.
 var HL_INFO_URL = "https://api.hyperliquid.xyz/info";
 
 async function hlInfoPost(body: any): Promise<any> {
@@ -1557,6 +1558,13 @@ async function scanForOpportunities(
 
     if (size <= 0) {
       result.skipped.push(opp.coin + ":size_zero");
+      continue;
+    }
+
+    // Guard: skip if capped position is too small to be meaningful (< $5)
+    if (positionUSD < 5) {
+      result.skipped.push(opp.coin + ":position_too_small($" + positionUSD.toFixed(2) + ")");
+      journal.logAction("FILTER", opp.coin + " skipped — position $" + positionUSD.toFixed(2) + " too small after OI cap (possible testnet/bad data)");
       continue;
     }
 
