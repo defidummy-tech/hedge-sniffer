@@ -406,20 +406,41 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
     journal.logAction("WARN", "Failed to fetch main dex positions: " + e.message);
   }
 
-  // 2) Builder dex positions
+  // 2) Builder dex positions — query each dex's clearinghouse state
   try {
-    var dexes: Array<{ name: string }> = await hlInfoPost({ type: "perpDexs" });
+    var dexes: Array<any> = await hlInfoPost({ type: "perpDexs" });
     if (Array.isArray(dexes)) {
-      var dexQueries = dexes
-        .filter(function(d) { return d && d.name; })
-        .map(async function(dex) {
+      var validDexes = dexes.filter(function(d) { return d && d.name; });
+      journal.logAction("DEBUG", "Querying " + validDexes.length + " builder dexes for positions");
+
+      var dexQueries = validDexes.map(async function(dex) {
           try {
             var dexState = await hlInfoPost({ type: "clearinghouseState", user: walletAddr, dex: dex.name });
             if (dexState && Array.isArray(dexState.assetPositions)) {
-              for (var dp of dexState.assetPositions) {
-                if (parseFloat(dp.position.szi) === 0) continue;
-                // Builder dex coin in our journal = dexName + ":" + position.coin
-                var fullCoin = dex.name + ":" + dp.position.coin;
+              var dexPositions = dexState.assetPositions.filter(function(p: any) {
+                return parseFloat(p.position.szi) !== 0;
+              });
+              if (dexPositions.length > 0) {
+                journal.logAction("DEBUG", "Dex " + dex.name + ": found " + dexPositions.length + " position(s), coin samples: " +
+                  dexPositions.slice(0, 3).map(function(p: any) { return p.position.coin; }).join(", "));
+              }
+              for (var dp of dexPositions) {
+                var apiCoin = dp.position.coin; // e.g., "xyz:CL" or "CL"
+                // The journal stores coins as dexName + ":" + universeEntry.name
+                // where universeEntry.name is already prefixed (e.g., "xyz:CL")
+                // So journal coin = "xyz:xyz:CL"
+                //
+                // clearinghouseState may return position.coin as either:
+                //   "xyz:CL" (namespaced) → fullCoin = "xyz:xyz:CL" ✓
+                //   "CL" (bare) → fullCoin = "xyz:CL" ✗ — need to prefix
+                var fullCoin: string;
+                if (apiCoin.indexOf(":") !== -1) {
+                  // Already namespaced (e.g., "xyz:CL") — prepend dex name
+                  fullCoin = dex.name + ":" + apiCoin;
+                } else {
+                  // Bare name (e.g., "CL") — construct full journal format
+                  fullCoin = dex.name + ":" + dex.name + ":" + apiCoin;
+                }
                 coins.add(fullCoin);
                 positions.push({
                   coin: fullCoin,
@@ -432,14 +453,17 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
               }
             }
           } catch (e: any) {
-            // Individual dex query failure is non-critical
+            journal.logAction("WARN", "Builder dex " + dex.name + " position query failed: " + e.message);
           }
         });
       await Promise.allSettled(dexQueries);
     }
   } catch (e: any) {
-    journal.logAction("WARN", "Failed to fetch builder dex positions: " + e.message);
+    journal.logAction("WARN", "Failed to fetch builder dex list: " + e.message);
   }
+
+  journal.logAction("DEBUG", "fetchAllLivePositions: " + positions.length + " total positions, coins: " +
+    Array.from(coins).join(", "));
 
   return { coins: coins, positions: positions };
 }
@@ -1013,8 +1037,22 @@ async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
   var live = await fetchAllLivePositions(walletAddr);
   var liveCoins = live.coins;
 
+  // Log what we found for debugging
+  journal.logAction("PHANTOM-CHECK", "Open journal trades: " +
+    openTrades.map(function(t) { return t.coin; }).join(", ") +
+    " | Live exchange coins: " + Array.from(liveCoins).join(", "));
+
   for (var trade of openTrades) {
     if (liveCoins.has(trade.coin)) continue; // position exists on exchange — OK
+
+    // Builder dex trades: NEVER phantom-close them.
+    // The clearinghouseState API may return coin names that don't match our journal format,
+    // so we can't reliably verify builder dex positions. Instead, skip them entirely.
+    var isBuilderDex = trade.coin.indexOf(":") !== -1;
+    if (isBuilderDex) {
+      journal.logAction("PHANTOM-SKIP", trade.coin + " is builder dex — skipping phantom cleanup (API coin name may not match journal)");
+      continue;
+    }
 
     // Journal trade has no matching exchange position — it's a phantom
     journal.logAction("CLEANUP", "Phantom trade " + trade.coin + " " + trade.direction.toUpperCase() +
@@ -1440,15 +1478,29 @@ async function checkExistingPositions(
 
       // Find current position from ALL positions (main + builder dex)
       var pos = positionMap[trade.coin];
-      var unrealizedPnl = pos ? parseFloat(pos.unrealizedPnl) : 0;
       var currentPrice = pos ? parseFloat(pos.entryPx) : trade.entryPrice; // fallback
-      // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid, negative = you received)
-      var cumFunding = pos ? -parseFloat(pos.cumFunding) : 0;
 
       // Get mid price for PnL calc (check builder dex mids too)
       var mids = await hl.info.getAllMids();
       for (var bmk in builderMids) mids[bmk] = builderMids[bmk];
       var midPrice = mids[trade.coin] ? parseFloat(mids[trade.coin]) : trade.entryPrice;
+
+      // Calculate unrealized PnL and funding
+      var unrealizedPnl: number;
+      var cumFunding: number;
+      if (pos) {
+        unrealizedPnl = parseFloat(pos.unrealizedPnl);
+        // Negate: HL's cumFunding.sinceOpen is "funding paid" (positive = you paid, negative = you received)
+        cumFunding = -parseFloat(pos.cumFunding);
+      } else {
+        // Position not found in exchange data (builder dex name mismatch) — calculate from mid price
+        var calcNotional = trade.sizeUSD * trade.leverage;
+        var calcPriceChange = (midPrice - trade.entryPrice) / trade.entryPrice;
+        unrealizedPnl = trade.direction === "long"
+          ? calcNotional * calcPriceChange
+          : calcNotional * (-calcPriceChange);
+        cumFunding = trade.fundingEarned; // use journal's accrued funding
+      }
 
       // Trailing stop for real mode: ratchet stop using trade.stopPrice as peak tracker
       if (config.trailingStopPct > 0 && trade.stopPrice != null && unrealizedPnl > 0) {
@@ -2314,19 +2366,27 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
 
     // Fetch ALL live positions (main dex + builder dexes)
     var live = await fetchAllLivePositions(walletAddr);
-    var mids = await hl.info.getAllMids();
+    var mids: Record<string, string> = await hl.info.getAllMids();
 
-    // Also fetch builder-dex mids for builder dex positions
-    var builderCoins = live.positions
-      .filter(function(p) { return p.coin.indexOf(":") !== -1; })
-      .map(function(p) { return p.coin; });
-    if (builderCoins.length > 0) {
+    // Get open trades from journal so we can calculate PnL for builder dex trades
+    var openTrades = await journal.getOpenTrades(false);
+
+    // Collect all builder dex coins (from both live positions AND journal trades)
+    var allBuilderCoins: string[] = [];
+    for (var lpos of live.positions) {
+      if (lpos.coin.indexOf(":") !== -1 && allBuilderCoins.indexOf(lpos.coin) === -1) allBuilderCoins.push(lpos.coin);
+    }
+    for (var ot of openTrades) {
+      if (ot.coin.indexOf(":") !== -1 && allBuilderCoins.indexOf(ot.coin) === -1) allBuilderCoins.push(ot.coin);
+    }
+    if (allBuilderCoins.length > 0) {
       try {
-        var bdData = await fetchBuilderDexFunding(builderCoins);
+        var bdData = await fetchBuilderDexFunding(allBuilderCoins);
         for (var bk in bdData.mids) mids[bk] = bdData.mids[bk];
       } catch (e: any) { /* non-critical */ }
     }
 
+    // 1) Add details from live exchange positions
     for (var pos of live.positions) {
       var coin = pos.coin;
       result[coin] = {
@@ -2335,6 +2395,26 @@ export async function getPositionDetails(): Promise<Record<string, { unrealizedP
         // We want positive = you earned
         cumFunding: -parseFloat(pos.cumFunding),
         midPrice: mids[coin] ? parseFloat(mids[coin]) : parseFloat(pos.entryPx),
+      };
+    }
+
+    // 2) For any open journal trades NOT found in live positions (e.g., builder dex name mismatch),
+    //    calculate PnL from mid prices so the dashboard shows something useful
+    for (var jt of openTrades) {
+      if (result[jt.coin]) continue; // already have live data
+      var midStr = mids[jt.coin];
+      if (!midStr) continue;
+      var mid = parseFloat(midStr);
+      if (mid <= 0) continue;
+      var notional = jt.sizeUSD * jt.leverage;
+      var priceChange = (mid - jt.entryPrice) / jt.entryPrice;
+      var calcPnl = jt.direction === "long"
+        ? notional * priceChange
+        : notional * (-priceChange);
+      result[jt.coin] = {
+        unrealizedPnl: calcPnl,
+        cumFunding: jt.fundingEarned, // use accrued funding from journal
+        midPrice: mid,
       };
     }
   } catch (e: any) {
