@@ -481,9 +481,10 @@ async function isFundingPersistent(coin: string, entryAPR: number, persistHours:
     // Also need at least persistHours worth of data points (1 per hour)
     return history.length >= persistHours;
   } catch (e: any) {
-    // If API fails, don't block entry but log
-    journal.logAction("WARN", "Funding persistence check failed for " + coin + ": " + e.message);
-    return true; // fail-open: don't block on API errors
+    // Fail-closed: if we can't verify funding is persistent, skip the entry.
+    // This prevents entering on brief funding spikes (especially builder dex coins).
+    journal.logAction("WARN", "Funding persistence check failed for " + coin + ": " + e.message + " — skipping entry");
+    return false;
   }
 }
 
@@ -1986,7 +1987,7 @@ async function scanForOpportunities(
 
         await journal.addTrade(trade);
 
-        // Place stop-loss order directly on Hyperliquid for instant execution
+        // Place stop-loss order on Hyperliquid (or track in software for builder dex)
         try {
           var realBasePMT = config.stopLossPct / (lev * 100);
           var realVol = await getRecentVolatility(opp.coin);
@@ -2004,40 +2005,47 @@ async function scanForOpportunities(
           }
 
           stopPrice = roundPx(stopPrice);
-          var slLimitPx = roundPx(slBuy ? stopPrice * 1.10 : stopPrice * 0.90);
-
-          var slSize = fillSize > 0 ? fillSize : size;
-
-          var slResponse = await hl.exchange.placeOrder({
-            coin: toPerpCoin(opp.coin),
-            is_buy: slBuy,
-            sz: slSize,
-            limit_px: slLimitPx,
-            order_type: { trigger: { triggerPx: stopPrice, isMarket: true, tpsl: "sl" } },
-            reduce_only: true,
-            grouping: "na",
-          });
-
-          var slAccepted = false;
-          if (slResponse && slResponse.response && slResponse.response.data && slResponse.response.data.statuses) {
-            var slStatus = slResponse.response.data.statuses[0];
-            if (slStatus && slStatus.resting) {
-              slAccepted = true;
-            } else if (slStatus && slStatus.filled) {
-              slAccepted = true;
-            } else if (slStatus && slStatus.error) {
-              throw new Error(slStatus.error);
-            }
-          }
 
           // Store the stop price on the trade record for trailing stop tracking
           trade.stopPrice = stopPrice;
           await journal.updateTradeStop(trade.id, stopPrice);
 
-          if (slAccepted) {
-            journal.logAction("SL", opp.coin + " stop-loss set at $" + fmtPx(stopPrice) + " (" + config.stopLossPct + "% loss)");
+          if (isBuilderDex) {
+            // Builder dex: SDK can't place trigger orders, use software-based SL
+            // The bot tick loop checks trade.stopPrice each cycle and closes if hit
+            journal.logAction("SL", opp.coin + " software stop-loss set at $" + fmtPx(stopPrice) + " (" + config.stopLossPct + "% loss)");
           } else {
-            journal.logAction("WARN", "Stop-loss response unclear for " + opp.coin + ": " + JSON.stringify(slResponse).slice(0, 200));
+            // Main dex: place exchange-level stop-loss for instant execution
+            var slLimitPx = roundPx(slBuy ? stopPrice * 1.10 : stopPrice * 0.90);
+            var slSize = fillSize > 0 ? fillSize : size;
+
+            var slResponse = await hl.exchange.placeOrder({
+              coin: toPerpCoin(opp.coin),
+              is_buy: slBuy,
+              sz: slSize,
+              limit_px: slLimitPx,
+              order_type: { trigger: { triggerPx: stopPrice, isMarket: true, tpsl: "sl" } },
+              reduce_only: true,
+              grouping: "na",
+            });
+
+            var slAccepted = false;
+            if (slResponse && slResponse.response && slResponse.response.data && slResponse.response.data.statuses) {
+              var slStatus = slResponse.response.data.statuses[0];
+              if (slStatus && slStatus.resting) {
+                slAccepted = true;
+              } else if (slStatus && slStatus.filled) {
+                slAccepted = true;
+              } else if (slStatus && slStatus.error) {
+                throw new Error(slStatus.error);
+              }
+            }
+
+            if (slAccepted) {
+              journal.logAction("SL", opp.coin + " stop-loss set at $" + fmtPx(stopPrice) + " (" + config.stopLossPct + "% loss)");
+            } else {
+              journal.logAction("WARN", "Stop-loss response unclear for " + opp.coin + ": " + JSON.stringify(slResponse).slice(0, 200));
+            }
           }
         } catch (slErr: any) {
           journal.logAction("WARN", "Stop-loss placement failed for " + opp.coin + ": " + slErr.message);
