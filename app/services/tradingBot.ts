@@ -1874,37 +1874,27 @@ export async function getAccountStatus(): Promise<{
     return { balance: 0, marginUsed: 0, positions: [], walletAddress: "", error: "No private key found", debug: debug };
   }
 
-  // Direct raw fetch to testnet API (bypass SDK to compare)
+  // Fetch spot balance (unified accounts keep USDC in spot clearinghouse)
+  var spotBalance = 0;
   try {
-    var testnetUrl = config.testnet
+    var apiUrl = config.testnet
       ? "https://api.hyperliquid-testnet.xyz/info"
       : "https://api.hyperliquid.xyz/info";
-    debug.directApiUrl = testnetUrl;
+    debug.apiUrl = apiUrl;
 
-    var rawRes = await fetch(testnetUrl, {
+    var spotRes = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "clearinghouseState", user: walletAddr }),
+      body: JSON.stringify({ type: "spotClearinghouseState", user: walletAddr }),
     });
-    var rawJson = await rawRes.json();
-    debug.directBalance = rawJson.marginSummary ? rawJson.marginSummary.accountValue : "no_margin_summary";
-    debug.directRawKeys = rawJson ? Object.keys(rawJson) : [];
+    var spotJson = await spotRes.json();
+    if (spotJson && Array.isArray(spotJson.balances)) {
+      var usdcBal = spotJson.balances.find(function(b: any) { return b.coin === "USDC"; });
+      if (usdcBal) spotBalance = parseFloat(usdcBal.total || "0");
+    }
+    debug.spotBalance = spotBalance;
   } catch (e: any) {
-    debug.directError = e.message;
-  }
-
-  // Also check mainnet for comparison
-  try {
-    var mainUrl = "https://api.hyperliquid.xyz/info";
-    var mainRes = await fetch(mainUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "clearinghouseState", user: walletAddr }),
-    });
-    var mainJson = await mainRes.json();
-    debug.mainnetBalance = mainJson.marginSummary ? mainJson.marginSummary.accountValue : "no_margin_summary";
-  } catch (e: any) {
-    debug.mainnetError = e.message;
+    debug.spotError = e.message;
   }
 
   try {
@@ -1912,10 +1902,12 @@ export async function getAccountStatus(): Promise<{
     debug.sdkBaseUrl = (hl as any).baseUrl || "unknown";
 
     var state = await hl.info.perpetuals.getClearinghouseState(walletAddr);
-    debug.sdkBalance = state.marginSummary.accountValue;
+    var perpsBalance = parseFloat(state.marginSummary.accountValue);
+    debug.perpsBalance = perpsBalance;
+    debug.totalBalance = perpsBalance + spotBalance;
 
     return {
-      balance: parseFloat(state.marginSummary.accountValue),
+      balance: perpsBalance + spotBalance,
       marginUsed: parseFloat(state.marginSummary.totalMarginUsed),
       positions: state.assetPositions.map(function(p) {
         return {
@@ -1934,7 +1926,8 @@ export async function getAccountStatus(): Promise<{
     var errMsg = e.message || "Unknown error";
     journal.logAction("ERROR", "Account status: " + errMsg);
     debug.sdkError = errMsg;
-    return { balance: 0, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg, debug: debug };
+    // If perps SDK fails but we have spot balance, still show it
+    return { balance: spotBalance, marginUsed: 0, positions: [], walletAddress: walletAddr, error: errMsg, debug: debug };
   }
 }
 
