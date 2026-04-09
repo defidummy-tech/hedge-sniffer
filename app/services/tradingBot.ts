@@ -417,60 +417,76 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
     journal.logAction("WARN", "Failed to fetch main dex positions: " + e.message);
   }
 
-  // 2) Builder dex positions — query each dex's clearinghouse state
+  // 2) Builder dex positions — only query dexes that have open journal trades
+  //    (avoids querying all 8+ dexes unnecessarily)
   try {
-    var dexes: Array<any> = await hlInfoPost({ type: "perpDexs" });
-    if (Array.isArray(dexes)) {
-      var validDexes = dexes.filter(function(d) { return d && d.name; });
-      // Only log once per cache refresh, not every call
+    var openTrades = await journal.getOpenTrades(false);
+    var dexesNeeded = new Set<string>();
+    for (var ot of openTrades) {
+      var colonIdx = ot.coin.indexOf(":");
+      if (colonIdx !== -1) {
+        dexesNeeded.add(ot.coin.substring(0, colonIdx));
+      }
+    }
 
-      var dexQueries = validDexes.map(async function(dex) {
-          try {
-            var dexState = await hlInfoPost({ type: "clearinghouseState", user: walletAddr, dex: dex.name });
-            if (dexState && Array.isArray(dexState.assetPositions)) {
-              var dexPositions = dexState.assetPositions.filter(function(p: any) {
-                return parseFloat(p.position.szi) !== 0;
-              });
-              if (dexPositions.length > 0) {
-                journal.logAction("DEBUG", "Dex " + dex.name + ": found " + dexPositions.length + " position(s), coin samples: " +
-                  dexPositions.slice(0, 3).map(function(p: any) { return p.position.coin; }).join(", "));
-              }
-              for (var dp of dexPositions) {
-                var apiCoin = dp.position.coin; // e.g., "xyz:CL" or "CL"
-                // The journal stores coins as dexName + ":" + universeEntry.name
-                // where universeEntry.name is already prefixed (e.g., "xyz:CL")
-                // So journal coin = "xyz:xyz:CL"
-                //
-                // clearinghouseState may return position.coin as either:
-                //   "xyz:CL" (namespaced) → fullCoin = "xyz:xyz:CL" ✓
-                //   "CL" (bare) → fullCoin = "xyz:CL" ✗ — need to prefix
-                var fullCoin: string;
-                if (apiCoin.indexOf(":") !== -1) {
-                  // Already namespaced (e.g., "xyz:CL") — prepend dex name
-                  fullCoin = dex.name + ":" + apiCoin;
-                } else {
-                  // Bare name (e.g., "CL") — construct full journal format
-                  fullCoin = dex.name + ":" + dex.name + ":" + apiCoin;
-                }
-                coins.add(fullCoin);
-                positions.push({
-                  coin: fullCoin,
-                  szi: dp.position.szi,
-                  entryPx: dp.position.entryPx,
-                  unrealizedPnl: dp.position.unrealizedPnl,
-                  leverage: dp.position.leverage ? dp.position.leverage.value : 1,
-                  cumFunding: dp.position.cumFunding ? dp.position.cumFunding.sinceOpen : "0",
-                });
-              }
-            }
-          } catch (e: any) {
-            journal.logAction("WARN", "Builder dex " + dex.name + " position query failed: " + e.message);
+    if (dexesNeeded.size > 0) {
+      var dexList = Array.from(dexesNeeded);
+      journal.logAction("DEBUG", "Querying builder dex positions for: " + dexList.join(", "));
+
+      // Query each dex sequentially (more reliable than concurrent)
+      for (var di = 0; di < dexList.length; di++) {
+        var dexName = dexList[di];
+        try {
+          var dexRes = await fetch(HL_INFO_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "clearinghouseState", user: walletAddr, dex: dexName }),
+          });
+          journal.logAction("DEBUG", "Dex " + dexName + " clearinghouseState HTTP " + dexRes.status);
+
+          if (!dexRes.ok) {
+            journal.logAction("WARN", "Dex " + dexName + " API returned " + dexRes.status);
+            continue;
           }
-        });
-      await Promise.allSettled(dexQueries);
+
+          var dexState = await dexRes.json();
+          var dexAssetPositions = dexState && dexState.assetPositions;
+          if (!Array.isArray(dexAssetPositions)) {
+            journal.logAction("WARN", "Dex " + dexName + " no assetPositions in response, keys: " +
+              (dexState ? Object.keys(dexState).join(",") : "null"));
+            continue;
+          }
+
+          var dexPositions = dexAssetPositions.filter(function(p: any) {
+            return parseFloat(p.position.szi) !== 0;
+          });
+          journal.logAction("DEBUG", "Dex " + dexName + ": " + dexPositions.length + " open position(s) of " + dexAssetPositions.length + " total");
+
+          for (var dp of dexPositions) {
+            var apiCoin = dp.position.coin; // e.g., "xyz:CL" or "CL"
+            var fullCoin: string;
+            if (apiCoin.indexOf(":") !== -1) {
+              fullCoin = dexName + ":" + apiCoin; // "xyz" + ":" + "xyz:CL" = "xyz:xyz:CL"
+            } else {
+              fullCoin = dexName + ":" + dexName + ":" + apiCoin; // "xyz" + ":" + "xyz" + ":" + "CL"
+            }
+            coins.add(fullCoin);
+            positions.push({
+              coin: fullCoin,
+              szi: dp.position.szi,
+              entryPx: dp.position.entryPx,
+              unrealizedPnl: dp.position.unrealizedPnl,
+              leverage: dp.position.leverage ? dp.position.leverage.value : 1,
+              cumFunding: dp.position.cumFunding ? dp.position.cumFunding.sinceOpen : "0",
+            });
+          }
+        } catch (e: any) {
+          journal.logAction("WARN", "Builder dex " + dexName + " query failed: " + e.message);
+        }
+      }
     }
   } catch (e: any) {
-    journal.logAction("WARN", "Failed to fetch builder dex list: " + e.message);
+    journal.logAction("WARN", "Builder dex position fetch error: " + e.message);
   }
 
   journal.logAction("DEBUG", "fetchAllLivePositions: " + positions.length + " total positions, coins: " +
