@@ -461,8 +461,12 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
     }
   }
 
-  journal.logAction("DEBUG", "fetchAllLivePositions: " + positions.length + " total positions, coins: " +
-    Array.from(coins).join(", "));
+  // Only log when position count changes to avoid log spam
+  var prevCount = _livePositionCache ? _livePositionCache.positions.length : -1;
+  if (positions.length !== prevCount) {
+    journal.logAction("POSITIONS", "Live positions: " + positions.length + " — " +
+      Array.from(coins).join(", "));
+  }
 
   // Cache the result
   var result = { coins: coins, positions: positions };
