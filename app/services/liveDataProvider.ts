@@ -44,7 +44,9 @@ async function fetchHLMeta(): Promise<HLMeta> {
   return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
 }
 
-/** Discover all builder dexes and fetch their asset data */
+/** Fetch builder dex asset data (only known dexes — avoids flooding API with 30+ queries) */
+var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "abcd", "cash", "para"];
+
 async function fetchBuilderDexMeta(): Promise<{
   meta: HLMeta;
   assets: Array<{ coin: string; dex: string; funding: number; volume: number }>;
@@ -53,25 +55,17 @@ async function fetchBuilderDexMeta(): Promise<{
   var assets: Array<{ coin: string; dex: string; funding: number; volume: number }> = [];
 
   try {
-    var dexRes = await fetch("/api/hyperliquid", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "perpDexs" }),
-    });
-    if (!dexRes.ok) return { meta: meta, assets: assets };
-    var dexes: Array<{ name: string }> = await dexRes.json();
-    if (!Array.isArray(dexes) || dexes.length === 0) return { meta: meta, assets: assets };
-
+    // Query only known builder dexes (not full perpDexs list which can be 30+ dexes)
     var dexResults = await Promise.allSettled(
-      dexes.map(async function(dex) {
+      KNOWN_BUILDER_DEXES.map(async function(dexName) {
         var res = await fetch("/api/hyperliquid", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "metaAndAssetCtxs", dex: dex.name }),
+          body: JSON.stringify({ type: "metaAndAssetCtxs", dex: dexName }),
         });
-        if (!res.ok) throw new Error("dex " + dex.name + " meta " + res.status);
+        if (!res.ok) throw new Error("dex " + dexName + " meta " + res.status);
         var data = await res.json();
-        return { dexName: dex.name, meta: data[0], ctxs: data[1] };
+        return { dexName: dexName, meta: data[0], ctxs: data[1] };
       })
     );
 
@@ -266,8 +260,27 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     mappings = PRIORITY_MAPPINGS;
   }
 
-  // Step 4: Build assets in parallel
-  var assetPromises = mappings.map(async function(mapping) {
+  // Step 4: Build assets with concurrency limit (avoid flooding server with 100+ requests)
+  var CONCURRENCY = 4;
+  var assets: Asset[] = [];
+  for (var ci = 0; ci < mappings.length; ci += CONCURRENCY) {
+    var batch = mappings.slice(ci, ci + CONCURRENCY);
+    var batchResults = await Promise.allSettled(batch.map(buildAssetFromMapping));
+    for (var br of batchResults) {
+      if (br.status === "fulfilled" && br.value) {
+        if (br.value.isLive) liveCount++;
+        assets.push(br.value.asset);
+      }
+    }
+  }
+
+  if (assets.length === 0) {
+    return { assets: initAssets(), liveCount: 0 };
+  }
+
+  return { assets: assets, liveCount: liveCount };
+
+  async function buildAssetFromMapping(mapping: MarketMapping): Promise<{ asset: Asset; isLive: boolean } | null> {
     var seedAsset = SEED.find(function(s) { return s.sym === mapping.sym; });
     var currentPrice = hlMeta.prices[mapping.sym] || (seedAsset ? seedAsset.pr : 0);
     if (!currentPrice) return null;
@@ -346,39 +359,27 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
       });
     }
 
-    if (priceIsLive || betsAreLive) liveCount++;
+    var isLive = priceIsLive || betsAreLive;
 
     return {
-      sym: mapping.sym,
-      name: mapping.name,
-      cat: mapping.cat,
-      pr: +currentPrice.toFixed(4),
-      vl: currentPrice * 0.01,
-      bets: bets,
-      priceHistory: priceHistory,
-      fundingRate: fundingRate,
-      fundingRateAPR: fundingRate * 8760,
-      fundingRateHistory: fundingHistory,
-      openInterest: oi,
-      dayNtlVlm: vol,
-      premium: prem,
-      hasPerp: mapping.hasPerp,
-      coin: mapping.coin,
-    } as Asset;
-  });
-
-  var results = await Promise.allSettled(assetPromises);
-  var assets: Asset[] = [];
-  for (var i = 0; i < results.length; i++) {
-    var r = results[i];
-    if (r.status === "fulfilled" && r.value) {
-      assets.push(r.value);
-    }
+      asset: {
+        sym: mapping.sym,
+        name: mapping.name,
+        cat: mapping.cat,
+        pr: +currentPrice.toFixed(4),
+        vl: currentPrice * 0.01,
+        bets: bets,
+        priceHistory: priceHistory,
+        fundingRate: fundingRate,
+        fundingRateAPR: fundingRate * 8760,
+        fundingRateHistory: fundingHistory,
+        openInterest: oi,
+        dayNtlVlm: vol,
+        premium: prem,
+        hasPerp: mapping.hasPerp,
+        coin: mapping.coin,
+      } as Asset,
+      isLive: isLive,
+    };
   }
-
-  if (assets.length === 0) {
-    return { assets: initAssets(), liveCount: 0 };
-  }
-
-  return { assets: assets, liveCount: liveCount };
 }
