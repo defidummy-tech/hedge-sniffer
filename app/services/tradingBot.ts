@@ -296,7 +296,7 @@ async function fetchBuilderDexOpportunities(): Promise<Array<{
 
   try {
     // Only query known builder dexes instead of fetching the full perpDexs list
-    var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "cash", "para"];
+    var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "abcd", "cash", "para"];
 
     for (var di = 0; di < KNOWN_BUILDER_DEXES.length; di++) {
       var dexName = KNOWN_BUILDER_DEXES[di];
@@ -429,7 +429,7 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
 
   // 2) Builder dex positions — query ALL known dexes (needed for recovery after redeploy)
   //    The 30s cache prevents excessive API calls on repeated dashboard refreshes.
-  var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "cash", "para"];
+  var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "abcd", "cash", "para"];
   var builderDexFailCount = 0;
   for (var di = 0; di < KNOWN_BUILDER_DEXES.length; di++) {
     var dexName = KNOWN_BUILDER_DEXES[di];
@@ -1055,7 +1055,13 @@ async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
 
   var walletAddr = getWalletAddress();
 
-  // Fetch ALL live positions including builder dex positions
+  // IMPORTANT: Invalidate cache so we get a FRESH read from exchange.
+  // Without this, we'd use stale cached data from earlier in the same tick,
+  // which could still show positions that were just liquidated.
+  _livePositionCache = null;
+  _livePositionCacheTime = 0;
+
+  // Fetch ALL live positions including builder dex positions (fresh query)
   var live = await fetchAllLivePositions(walletAddr);
   var liveCoins = live.coins;
 
@@ -1170,17 +1176,12 @@ export async function botTick(): Promise<{
     return result;
   }
 
-  // ── Step 0: Recover orphaned positions + clean phantoms (skip in paper mode) ──
+  // ── Step 0: Recover orphaned positions (skip in paper mode) ──
   if (!config.paperTrading) {
     try {
       await recoverOrphanedPositions(hl, config);
     } catch (e: any) {
       journal.logAction("ERROR", "Position recovery: " + e.message);
-    }
-    try {
-      await cleanupPhantomTrades(hl);
-    } catch (e: any) {
-      journal.logAction("ERROR", "Phantom cleanup: " + e.message);
     }
   }
 
@@ -1216,6 +1217,16 @@ export async function botTick(): Promise<{
   } catch (e: any) {
     journal.logAction("ERROR", "Scan: " + e.message);
     result.errors.push("Scan: " + e.message);
+  }
+
+  // ── Step 3: Clean up phantom trades (AFTER scanning — catches positions that
+  //    were opened then immediately liquidated within this tick) ──
+  if (!config.paperTrading) {
+    try {
+      await cleanupPhantomTrades(hl);
+    } catch (e: any) {
+      journal.logAction("ERROR", "Phantom cleanup: " + e.message);
+    }
   }
 
   return result;
