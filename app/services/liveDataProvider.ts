@@ -1,4 +1,8 @@
 // ═══ Live data fetcher: Hyperliquid + Polymarket → Asset[] ═══
+// IMPORTANT: This runs on every dashboard refresh (every 5 min).
+// Minimize proxy requests — Render's server also handles cron ticks concurrently.
+// Strategy: fetch meta data (prices/funding) in bulk, use synthetic charts,
+// lazy-load detailed history only when user drills into a specific asset.
 
 import type { Asset, Bet, PricePoint, OddsPoint, FundingPoint } from "../types";
 import { SEED, initAssets, genPriceHistory, genOddsHistory, genFundingHistory } from "./dataProvider";
@@ -44,8 +48,9 @@ async function fetchHLMeta(): Promise<HLMeta> {
   return { names: names, prices: prices, funding: funding, openInterest: openInterest, dayVolume: dayVolume, premium: premium };
 }
 
-/** Fetch builder dex asset data (only known dexes — avoids flooding API with 30+ queries) */
+/** Fetch builder dex asset data — batched 3 at a time to avoid overwhelming the server */
 var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "abcd", "cash", "para"];
+var BD_CONCURRENCY = 3; // Max 3 concurrent builder dex queries (was 8 simultaneous)
 
 async function fetchBuilderDexMeta(): Promise<{
   meta: HLMeta;
@@ -55,43 +60,46 @@ async function fetchBuilderDexMeta(): Promise<{
   var assets: Array<{ coin: string; dex: string; funding: number; volume: number }> = [];
 
   try {
-    // Query only known builder dexes (not full perpDexs list which can be 30+ dexes)
-    var dexResults = await Promise.allSettled(
-      KNOWN_BUILDER_DEXES.map(async function(dexName) {
-        var res = await fetch("/api/hyperliquid", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "metaAndAssetCtxs", dex: dexName }),
+    // Batch builder dex queries to avoid slamming the server
+    for (var bi = 0; bi < KNOWN_BUILDER_DEXES.length; bi += BD_CONCURRENCY) {
+      var batch = KNOWN_BUILDER_DEXES.slice(bi, bi + BD_CONCURRENCY);
+      var dexResults = await Promise.allSettled(
+        batch.map(async function(dexName) {
+          var res = await fetch("/api/hyperliquid", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "metaAndAssetCtxs", dex: dexName }),
+          });
+          if (!res.ok) throw new Error("dex " + dexName + " meta " + res.status);
+          var data = await res.json();
+          return { dexName: dexName, meta: data[0], ctxs: data[1] };
+        })
+      );
+
+      for (var dr of dexResults) {
+        if (dr.status !== "fulfilled") continue;
+        var dexData = dr.value;
+        if (!dexData.meta || !dexData.meta.universe) continue;
+
+        dexData.meta.universe.forEach(function(u: any, i: number) {
+          var ctx = dexData.ctxs[i];
+          if (!ctx) return;
+          var fullCoin = dexData.dexName + ":" + u.name;
+          var price = parseFloat(ctx.markPx || "0");
+          var fundRate = parseFloat(ctx.funding || "0");
+          var vol = parseFloat(ctx.dayNtlVlm || "0");
+          if (price <= 0) return;
+
+          meta.names.push(fullCoin);
+          meta.prices[fullCoin] = price;
+          meta.funding[fullCoin] = fundRate;
+          meta.openInterest[fullCoin] = parseFloat(ctx.openInterest || "0");
+          meta.dayVolume[fullCoin] = vol;
+          meta.premium[fullCoin] = parseFloat(ctx.premium || "0");
+
+          assets.push({ coin: fullCoin, dex: dexData.dexName, funding: fundRate, volume: vol });
         });
-        if (!res.ok) throw new Error("dex " + dexName + " meta " + res.status);
-        var data = await res.json();
-        return { dexName: dexName, meta: data[0], ctxs: data[1] };
-      })
-    );
-
-    for (var dr of dexResults) {
-      if (dr.status !== "fulfilled") continue;
-      var dexData = dr.value;
-      if (!dexData.meta || !dexData.meta.universe) continue;
-
-      dexData.meta.universe.forEach(function(u: any, i: number) {
-        var ctx = dexData.ctxs[i];
-        if (!ctx) return;
-        var fullCoin = dexData.dexName + ":" + u.name;
-        var price = parseFloat(ctx.markPx || "0");
-        var fundRate = parseFloat(ctx.funding || "0");
-        var vol = parseFloat(ctx.dayNtlVlm || "0");
-        if (price <= 0) return;
-
-        meta.names.push(fullCoin);
-        meta.prices[fullCoin] = price;
-        meta.funding[fullCoin] = fundRate;
-        meta.openInterest[fullCoin] = parseFloat(ctx.openInterest || "0");
-        meta.dayVolume[fullCoin] = vol;
-        meta.premium[fullCoin] = parseFloat(ctx.premium || "0");
-
-        assets.push({ coin: fullCoin, dex: dexData.dexName, funding: fundRate, volume: vol });
-      });
+      }
     }
   } catch (e) {
     console.warn("Builder dex discovery failed:", e);
@@ -100,7 +108,9 @@ async function fetchBuilderDexMeta(): Promise<{
   return { meta: meta, assets: assets };
 }
 
-async function fetchHLCandles(coin: string): Promise<PricePoint[]> {
+// ── Detail fetchers (lazy-loaded, NOT called during initial asset list build) ──
+
+export async function fetchHLCandles(coin: string): Promise<PricePoint[]> {
   var endTime = Date.now();
   var startTime = endTime - 7 * 24 * 60 * 60 * 1000;
   var res = await fetch("/api/hyperliquid", {
@@ -119,7 +129,7 @@ async function fetchHLCandles(coin: string): Promise<PricePoint[]> {
   });
 }
 
-async function fetchHLFundingHistory(coin: string): Promise<FundingPoint[]> {
+export async function fetchHLFundingHistory(coin: string): Promise<FundingPoint[]> {
   var endTime = Date.now();
   var startTime = endTime - 7 * 24 * 60 * 60 * 1000;
   var res = await fetch("/api/hyperliquid", {
@@ -155,14 +165,14 @@ interface PMEvent {
   markets: PMMarket[];
 }
 
-async function fetchPMEvents(searchTerm: string): Promise<PMEvent[]> {
+export async function fetchPMEvents(searchTerm: string): Promise<PMEvent[]> {
   var res = await fetch("/api/polymarket?endpoint=events&active=true&limit=20&order=volume&ascending=false&tag=" + encodeURIComponent(searchTerm));
   if (!res.ok) throw new Error("PM events " + res.status);
   var data = await res.json();
   return Array.isArray(data) ? data : [];
 }
 
-async function fetchPMOddsHistory(tokenId: string): Promise<OddsPoint[]> {
+export async function fetchPMOddsHistory(tokenId: string): Promise<OddsPoint[]> {
   var endTs = Math.floor(Date.now() / 1000);
   var startTs = endTs - 7 * 24 * 60 * 60;
   var res = await fetch("/api/polymarket?endpoint=prices-history&market=" + tokenId + "&startTs=" + startTs + "&endTs=" + endTs + "&fidelity=60");
@@ -221,11 +231,15 @@ function marketToBet(mkt: PMMarket, idx: number): Bet | null {
 }
 
 // ── Main entry point ──
+// CRITICAL: Only fetch bulk meta data here (prices + funding for all coins).
+// Do NOT fetch per-asset candles, funding history, or PM data — that was causing
+// 150-200+ proxy requests per refresh, crashing the Render server.
+// Charts use synthetic data; detail views can lazy-load real data if needed.
 
 export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: number }> {
   var liveCount = 0;
 
-  // Step 1: Fetch regular Hyperliquid perps meta (prices + funding + volume + OI)
+  // Step 1: Fetch regular Hyperliquid perps meta (1 request — prices + funding + volume + OI)
   var hlMeta: HLMeta = { names: [], prices: {}, funding: {}, openInterest: {}, dayVolume: {}, premium: {} };
   try {
     hlMeta = await fetchHLMeta();
@@ -233,7 +247,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     console.warn("Hyperliquid meta failed, using SEED:", e);
   }
 
-  // Step 2: Discover and fetch builder-dex assets (xyz:HYUNDAI, vntl:OPENAI, etc.)
+  // Step 2: Fetch builder-dex meta (3 at a time × 3 batches = 8 requests total, serialized)
   var builderDexAssets: Array<{ coin: string; dex: string; funding: number; volume: number }> = [];
   try {
     var bdResult = await fetchBuilderDexMeta();
@@ -252,7 +266,7 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     console.warn("Builder dex discovery failed:", e);
   }
 
-  // Step 3: Build dynamic asset list (priority + discovered high-funding/volume perps + builder dex)
+  // Step 3: Build dynamic asset list
   var mappings: MarketMapping[];
   if (hlMeta.names.length > 0) {
     mappings = buildAssetList(hlMeta.names, hlMeta.funding, hlMeta.dayVolume, hlMeta.openInterest, builderDexAssets);
@@ -260,17 +274,17 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
     mappings = PRIORITY_MAPPINGS;
   }
 
-  // Step 4: Build assets with concurrency limit (avoid flooding server with 100+ requests)
-  var CONCURRENCY = 4;
+  // Step 4: Build assets from meta data ONLY — no per-asset API calls.
+  // This is the key fix: we already have prices, funding, OI, volume from the
+  // bulk meta requests. Charts use synthetic data based on the live price/funding.
+  // Total requests: 1 (main meta) + 8 (builder dex meta) = 9 requests.
+  // Before this fix: 9 + (49 assets × 3-5 calls each) = 150-250 requests.
   var assets: Asset[] = [];
-  for (var ci = 0; ci < mappings.length; ci += CONCURRENCY) {
-    var batch = mappings.slice(ci, ci + CONCURRENCY);
-    var batchResults = await Promise.allSettled(batch.map(buildAssetFromMapping));
-    for (var br of batchResults) {
-      if (br.status === "fulfilled" && br.value) {
-        if (br.value.isLive) liveCount++;
-        assets.push(br.value.asset);
-      }
+  for (var ci = 0; ci < mappings.length; ci++) {
+    var asset = buildAssetFromMeta(mappings[ci], hlMeta);
+    if (asset) {
+      liveCount++;
+      assets.push(asset);
     }
   }
 
@@ -280,106 +294,96 @@ export async function fetchLiveAssets(): Promise<{ assets: Asset[]; liveCount: n
 
   return { assets: assets, liveCount: liveCount };
 
-  async function buildAssetFromMapping(mapping: MarketMapping): Promise<{ asset: Asset; isLive: boolean } | null> {
+  function buildAssetFromMeta(mapping: MarketMapping, meta: HLMeta): Asset | null {
     var seedAsset = SEED.find(function(s) { return s.sym === mapping.sym; });
-    var currentPrice = hlMeta.prices[mapping.sym] || (seedAsset ? seedAsset.pr : 0);
+    var currentPrice = meta.prices[mapping.sym] || (seedAsset ? seedAsset.pr : 0);
     if (!currentPrice) return null;
 
-    var fundingRate = hlMeta.funding[mapping.sym] || (seedAsset ? (seedAsset.fundingRate || 0) : 0);
-    var oi = hlMeta.openInterest[mapping.sym] || (seedAsset ? (seedAsset.openInterest || 0) : 0);
-    var vol = hlMeta.dayVolume[mapping.sym] || (seedAsset ? (seedAsset.dayNtlVlm || 0) : 0);
-    var prem = hlMeta.premium[mapping.sym] || 0;
+    var fundingRate = meta.funding[mapping.sym] || (seedAsset ? (seedAsset.fundingRate || 0) : 0);
+    var oi = meta.openInterest[mapping.sym] || (seedAsset ? (seedAsset.openInterest || 0) : 0);
+    var vol = meta.dayVolume[mapping.sym] || (seedAsset ? (seedAsset.dayNtlVlm || 0) : 0);
+    var prem = meta.premium[mapping.sym] || 0;
 
-    // Use the coin field for HL API calls (e.g. "vntl:OPENAI" for Ventuals, "BTC" for regular)
-    var hlCoin = mapping.coin;
+    // Use synthetic chart data based on live price — no per-asset API calls
+    var priceHistory = genPriceHistory(currentPrice, currentPrice * 0.01);
+    var fundingHistory = fundingRate ? genFundingHistory(fundingRate) : [];
 
-    // Fetch candle history
-    var priceHistory: PricePoint[];
-    var priceIsLive = false;
-    if (mapping.hasPerp && (hlMeta.prices[mapping.sym])) {
-      try {
-        priceHistory = await fetchHLCandles(hlCoin);
-        priceIsLive = true;
-      } catch {
-        priceHistory = genPriceHistory(currentPrice, currentPrice * 0.01);
-      }
-    } else {
-      priceHistory = genPriceHistory(currentPrice, currentPrice * 0.01);
-    }
-
-    // Fetch funding history
-    var fundingHistory: FundingPoint[] = [];
-    if (mapping.hasPerp && hlMeta.prices[mapping.sym]) {
-      try {
-        fundingHistory = await fetchHLFundingHistory(hlCoin);
-      } catch {
-        fundingHistory = fundingRate ? genFundingHistory(fundingRate) : [];
-      }
-    } else if (fundingRate) {
-      fundingHistory = genFundingHistory(fundingRate);
-    }
-
-    // Fetch Polymarket bets
+    // Use SEED bets if available (no PM API calls during bulk load)
     var bets: Bet[] = [];
-    var betsAreLive = false;
-    try {
-      var allEvents: PMEvent[] = [];
-      for (var si = 0; si < mapping.searchTerms.length; si++) {
-        var evts = await fetchPMEvents(mapping.searchTerms[si]);
-        allEvents = allEvents.concat(evts);
-      }
-      var markets = matchEventsToAsset(allEvents, mapping.searchTerms);
-      var rawBets: any[] = [];
-      for (var mi = 0; mi < markets.length; mi++) {
-        var bet = marketToBet(markets[mi], mi);
-        if (bet) rawBets.push(bet);
-      }
-      var historyResults = await Promise.allSettled(
-        rawBets.map(function(b: any) { return fetchPMOddsHistory(b._tokenId); })
-      );
-      for (var beti = 0; beti < rawBets.length; beti++) {
-        var hr = historyResults[beti];
-        if (hr.status === "fulfilled" && hr.value.length > 0) {
-          rawBets[beti].oddsHistory = hr.value;
-        } else {
-          rawBets[beti].oddsHistory = genOddsHistory(rawBets[beti].od, rawBets[beti].v);
-        }
-        delete rawBets[beti]._tokenId;
-        bets.push(rawBets[beti]);
-      }
-      if (bets.length > 0) betsAreLive = true;
-    } catch {
-      // Polymarket failed
-    }
-
-    // Fall back to SEED bets if we got none
-    if (bets.length === 0 && seedAsset) {
+    if (seedAsset) {
       bets = seedAsset.bets.map(function(b) {
         return { ...b, currentOdds: b.od, oddsHistory: genOddsHistory(b.od, b.v) };
       });
     }
 
-    var isLive = priceIsLive || betsAreLive;
-
     return {
-      asset: {
-        sym: mapping.sym,
-        name: mapping.name,
-        cat: mapping.cat,
-        pr: +currentPrice.toFixed(4),
-        vl: currentPrice * 0.01,
-        bets: bets,
-        priceHistory: priceHistory,
-        fundingRate: fundingRate,
-        fundingRateAPR: fundingRate * 8760,
-        fundingRateHistory: fundingHistory,
-        openInterest: oi,
-        dayNtlVlm: vol,
-        premium: prem,
-        hasPerp: mapping.hasPerp,
-        coin: mapping.coin,
-      } as Asset,
-      isLive: isLive,
-    };
+      sym: mapping.sym,
+      name: mapping.name,
+      cat: mapping.cat,
+      pr: +currentPrice.toFixed(4),
+      vl: currentPrice * 0.01,
+      bets: bets,
+      priceHistory: priceHistory,
+      fundingRate: fundingRate,
+      fundingRateAPR: fundingRate * 8760,
+      fundingRateHistory: fundingHistory,
+      openInterest: oi,
+      dayNtlVlm: vol,
+      premium: prem,
+      hasPerp: mapping.hasPerp,
+      coin: mapping.coin,
+    } as Asset;
   }
+}
+
+// ── Lazy-load detail data for a specific asset (called when user drills in) ──
+
+export async function fetchAssetDetails(coin: string, searchTerms: string[]): Promise<{
+  priceHistory: PricePoint[];
+  fundingHistory: FundingPoint[];
+  bets: Bet[];
+}> {
+  var priceHistory: PricePoint[] = [];
+  var fundingHistory: FundingPoint[] = [];
+  var bets: Bet[] = [];
+
+  // Fetch candles + funding history + PM data in parallel (max 3-4 requests per asset)
+  var results = await Promise.allSettled([
+    fetchHLCandles(coin),
+    fetchHLFundingHistory(coin),
+    fetchPMForAsset(searchTerms),
+  ]);
+
+  if (results[0].status === "fulfilled") priceHistory = results[0].value;
+  if (results[1].status === "fulfilled") fundingHistory = results[1].value;
+  if (results[2].status === "fulfilled") bets = results[2].value;
+
+  return { priceHistory: priceHistory, fundingHistory: fundingHistory, bets: bets };
+}
+
+async function fetchPMForAsset(searchTerms: string[]): Promise<Bet[]> {
+  var allEvents: PMEvent[] = [];
+  for (var si = 0; si < searchTerms.length; si++) {
+    var evts = await fetchPMEvents(searchTerms[si]);
+    allEvents = allEvents.concat(evts);
+  }
+  var markets = matchEventsToAsset(allEvents, searchTerms);
+  var rawBets: any[] = [];
+  for (var mi = 0; mi < markets.length; mi++) {
+    var bet = marketToBet(markets[mi], mi);
+    if (bet) rawBets.push(bet);
+  }
+  var historyResults = await Promise.allSettled(
+    rawBets.map(function(b: any) { return fetchPMOddsHistory(b._tokenId); })
+  );
+  for (var beti = 0; beti < rawBets.length; beti++) {
+    var hr = historyResults[beti];
+    if (hr.status === "fulfilled" && hr.value.length > 0) {
+      rawBets[beti].oddsHistory = hr.value;
+    } else {
+      rawBets[beti].oddsHistory = genOddsHistory(rawBets[beti].od, rawBets[beti].v);
+    }
+    delete rawBets[beti]._tokenId;
+  }
+  return rawBets;
 }

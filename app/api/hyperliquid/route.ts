@@ -1,10 +1,38 @@
 // ═══ Server-side proxy for Hyperliquid API (avoids CORS) ═══
+// Includes: response caching, in-flight deduplication, global concurrency limiter.
+// The concurrency limiter prevents the server from being overwhelmed when the
+// dashboard refresh and cron tick fire simultaneously.
 
 var cache: Record<string, { data: any; timestamp: number }> = {};
 
 // In-flight request deduplication — if the same cache key is already being fetched,
 // wait for that result instead of firing a duplicate request to HL
 var inflight: Record<string, Promise<any>> = {};
+
+// Global concurrency limiter — max 4 outbound requests to HL at any time.
+// Prevents Render server from exhausting memory/connections when cron + dashboard overlap.
+var MAX_CONCURRENT = 4;
+var activeCount = 0;
+var waitQueue: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (activeCount < MAX_CONCURRENT) {
+    activeCount++;
+    return Promise.resolve();
+  }
+  return new Promise(function(resolve) {
+    waitQueue.push(resolve);
+  });
+}
+
+function releaseSlot(): void {
+  if (waitQueue.length > 0) {
+    var next = waitQueue.shift()!;
+    next(); // hand slot to next waiter (activeCount stays the same)
+  } else {
+    activeCount--;
+  }
+}
 
 // Different TTLs by request type
 var CACHE_TTLS: Record<string, number> = {
@@ -60,6 +88,9 @@ export async function POST(request: Request) {
 }
 
 async function fetchFromHL(body: any, cacheKey: string): Promise<any> {
+  // Wait for a concurrency slot
+  await acquireSlot();
+
   var res: Response;
   try {
     res = await fetch("https://api.hyperliquid.xyz/info", {
@@ -69,6 +100,7 @@ async function fetchFromHL(body: any, cacheKey: string): Promise<any> {
       signal: AbortSignal.timeout(15000), // 15s timeout — don't let hung requests block forever
     });
   } catch (e: any) {
+    releaseSlot();
     // Network error, DNS failure, timeout, connection reset
     var err = new Error("Network error: " + (e.message || "fetch failed")) as any;
     err.hlStatus = 502;
@@ -76,12 +108,23 @@ async function fetchFromHL(body: any, cacheKey: string): Promise<any> {
   }
 
   if (!res.ok) {
+    releaseSlot();
     var err2 = new Error("HTTP " + res.status) as any;
     err2.hlStatus = res.status;
     throw err2;
   }
 
-  var data = await res.json();
+  var data: any;
+  try {
+    data = await res.json();
+  } catch (e: any) {
+    releaseSlot();
+    var err3 = new Error("JSON parse error") as any;
+    err3.hlStatus = 502;
+    throw err3;
+  }
+
+  releaseSlot();
   cache[cacheKey] = { data: data, timestamp: Date.now() };
   return data;
 }
