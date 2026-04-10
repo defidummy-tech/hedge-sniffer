@@ -2,6 +2,10 @@
 
 var cache: Record<string, { data: any; timestamp: number }> = {};
 
+// In-flight request deduplication — if the same cache key is already being fetched,
+// wait for that result instead of firing a duplicate request to HL
+var inflight: Record<string, Promise<any>> = {};
+
 // Different TTLs by request type
 var CACHE_TTLS: Record<string, number> = {
   metaAndAssetCtxs: 60000, // 1 min — funding rates don't change fast
@@ -13,7 +17,12 @@ var CACHE_TTLS: Record<string, number> = {
 var DEFAULT_CACHE_TTL = 30000; // 30s fallback
 
 export async function POST(request: Request) {
-  var body = await request.json();
+  var body: any;
+  try {
+    body = await request.json();
+  } catch (e: any) {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
 
   // Build cache key from all relevant fields
   var cacheKey = body.type + (body.dex ? ":dex=" + body.dex : "") +
@@ -25,18 +34,54 @@ export async function POST(request: Request) {
     return Response.json(cache[cacheKey].data);
   }
 
-  var res = await fetch("https://api.hyperliquid.xyz/info", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // If this exact request is already in-flight, wait for it instead of firing a duplicate
+  if (inflight[cacheKey]) {
+    try {
+      var shared = await inflight[cacheKey];
+      return Response.json(shared);
+    } catch (e: any) {
+      return Response.json({ error: "Hyperliquid API error (shared): " + (e.message || "unknown") }, { status: 502 });
+    }
+  }
+
+  // Fire the request and register it as in-flight
+  var fetchPromise = fetchFromHL(body, cacheKey);
+  inflight[cacheKey] = fetchPromise;
+
+  try {
+    var data = await fetchPromise;
+    return Response.json(data);
+  } catch (e: any) {
+    var status = e.hlStatus || 502;
+    return Response.json({ error: "Hyperliquid API error: " + (e.message || "unknown") }, { status: status });
+  } finally {
+    delete inflight[cacheKey];
+  }
+}
+
+async function fetchFromHL(body: any, cacheKey: string): Promise<any> {
+  var res: Response;
+  try {
+    res = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000), // 15s timeout — don't let hung requests block forever
+    });
+  } catch (e: any) {
+    // Network error, DNS failure, timeout, connection reset
+    var err = new Error("Network error: " + (e.message || "fetch failed")) as any;
+    err.hlStatus = 502;
+    throw err;
+  }
 
   if (!res.ok) {
-    return Response.json({ error: "Hyperliquid API error: " + res.status }, { status: res.status });
+    var err2 = new Error("HTTP " + res.status) as any;
+    err2.hlStatus = res.status;
+    throw err2;
   }
 
   var data = await res.json();
   cache[cacheKey] = { data: data, timestamp: Date.now() };
-
-  return Response.json(data);
+  return data;
 }
