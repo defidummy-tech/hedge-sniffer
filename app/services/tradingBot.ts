@@ -984,38 +984,71 @@ async function closeAllPaperPositions(): Promise<{ closed: string[]; errors: str
   return { closed: closed, errors: errors };
 }
 
-// ── Recover positions from Hyperliquid that aren't in the journal ──
-// This handles the case where the server restarts and Redis/files are empty
-// but positions are still open on the exchange.
-async function recoverOrphanedPositions(hl: Hyperliquid, config: BotConfig): Promise<void> {
-  var openTrades = await journal.getOpenTrades();
-  var knownCoins = new Set(openTrades.map(function(t) { return t.coin; }));
+// ── Sync journal with exchange — exchange is the single source of truth ──
+// Runs at START and END of every tick with a FRESH (uncached) exchange query.
+// 1. Journal "open" trades not on exchange → close as phantom
+// 2. Exchange positions not in journal → recover into journal
+// 3. Re-open phantom-closed journal entries if position reappears on exchange
+async function syncJournalWithExchange(config: BotConfig): Promise<void> {
+  if (config.paperTrading) return;
 
   var walletAddr = getWalletAddress();
 
-  // Fetch ALL live positions including builder dex
-  var live = await fetchAllLivePositions(walletAddr);
-  var liveCoinsSet = live.coins;
+  // ALWAYS invalidate cache — this sync must use fresh exchange data
+  _livePositionCache = null;
+  _livePositionCacheTime = 0;
 
-  // 1) Re-open phantom-closed trades that still have live positions
+  var live = await fetchAllLivePositions(walletAddr);
+
+  // If builder dex queries failed, skip sync entirely — can't trust the data
+  if (!live.builderDexQueriesOk) {
+    journal.logAction("SYNC-SKIP", "Builder dex queries failed — skipping journal sync to avoid false phantom closures");
+    return;
+  }
+
+  var liveCoinsSet = live.coins;
+  var openTrades = await journal.getOpenTrades(false); // non-paper only
   var allTrades = await journal.getAllTrades();
+  var knownCoins = new Set(openTrades.map(function(t) { return t.coin; }));
+
+  // Log current state for debugging
+  journal.logAction("SYNC", "Journal open: " +
+    (openTrades.length > 0 ? openTrades.map(function(t) { return t.coin; }).join(", ") : "(none)") +
+    " | Exchange live: " +
+    (live.positions.length > 0 ? Array.from(liveCoinsSet).join(", ") : "(none)"));
+
+  // 1) Close phantom journal trades (open in journal but NOT on exchange)
+  for (var trade of openTrades) {
+    if (liveCoinsSet.has(trade.coin)) continue; // position exists on exchange — OK
+
+    journal.logAction("SYNC-CLOSE", trade.coin + " " + trade.direction.toUpperCase() +
+      " — not found on exchange, closing journal entry");
+    await journal.closeTrade(trade.id, trade.entryPrice, 0, "phantom", 0, 0);
+  }
+
+  // 2) Re-open phantom-closed trades if position still/again exists on exchange
   var phantomClosed = allTrades.filter(function(t) {
     return t.status !== "open" && t.exitReason === "phantom" && liveCoinsSet.has(t.coin);
   });
   for (var phantom of phantomClosed) {
+    // Only re-open if no other open trade for this coin
+    if (knownCoins.has(phantom.coin)) continue;
     var reopened = await journal.reopenTrade(phantom.id);
     if (reopened) {
       knownCoins.add(phantom.coin);
-      journal.logAction("RECOVER", "Re-opened phantom-closed " + phantom.coin + " — position still exists on exchange");
+      journal.logAction("SYNC-REOPEN", phantom.coin + " re-opened — position exists on exchange");
     }
   }
 
-  // 2) Recover truly orphaned positions (on exchange but not in journal at all)
+  // 3) Recover truly orphaned positions (on exchange but not in journal at all)
+  // Re-read open trades since we may have re-opened some above
+  var updatedOpenTrades = await journal.getOpenTrades(false);
+  var updatedKnownCoins = new Set(updatedOpenTrades.map(function(t) { return t.coin; }));
+
   for (var pos of live.positions) {
     var coin = pos.coin;
-    if (knownCoins.has(coin)) continue; // already tracked
+    if (updatedKnownCoins.has(coin)) continue; // already tracked
 
-    // This position exists on HL but not in our journal — recover it
     var szi = parseFloat(pos.szi);
     var direction: "long" | "short" = szi > 0 ? "long" : "short";
     var entryPx = parseFloat(pos.entryPx);
@@ -1028,7 +1061,7 @@ async function recoverOrphanedPositions(hl: Hyperliquid, config: BotConfig): Pro
       sizeUSD: Math.abs(szi * entryPx / leverage),
       leverage: leverage,
       entryPrice: entryPx,
-      entryTime: Date.now() - 3600000, // approximate — we don't know actual entry time
+      entryTime: Date.now() - 3600000, // approximate
       entryFundingAPR: 0,
       exitPrice: null,
       exitTime: null,
@@ -1044,52 +1077,7 @@ async function recoverOrphanedPositions(hl: Hyperliquid, config: BotConfig): Pro
     };
 
     await journal.addTrade(recoveredTrade);
-    journal.logAction("RECOVER", "Recovered orphaned " + direction.toUpperCase() + " " + coin + " position (entry $" + entryPx.toFixed(2) + ")");
-  }
-}
-
-// ── Clean up journal trades that have no matching exchange position (phantom trades) ──
-async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
-  var openTrades = await journal.getOpenTrades(false); // non-paper only
-  if (openTrades.length === 0) return;
-
-  var walletAddr = getWalletAddress();
-
-  // IMPORTANT: Invalidate cache so we get a FRESH read from exchange.
-  // Without this, we'd use stale cached data from earlier in the same tick,
-  // which could still show positions that were just liquidated.
-  _livePositionCache = null;
-  _livePositionCacheTime = 0;
-
-  // Fetch ALL live positions including builder dex positions (fresh query)
-  var live = await fetchAllLivePositions(walletAddr);
-  var liveCoins = live.coins;
-
-  // Log what we found for debugging
-  journal.logAction("PHANTOM-CHECK", "Open journal trades: " +
-    openTrades.map(function(t) { return t.coin; }).join(", ") +
-    " | Live exchange coins: " + Array.from(liveCoins).join(", "));
-
-  for (var trade of openTrades) {
-    if (liveCoins.has(trade.coin)) continue; // position exists on exchange — OK
-
-    // Builder dex trades: only phantom-close if ALL builder dex queries succeeded.
-    // If any query failed, we can't be sure the position doesn't exist — skip to be safe.
-    var isBuilderDex = trade.coin.indexOf(":") !== -1;
-    if (isBuilderDex && !live.builderDexQueriesOk) {
-      journal.logAction("PHANTOM-SKIP", trade.coin + " — builder dex queries had failures, skipping phantom cleanup to be safe");
-      continue;
-    }
-
-    // Journal trade has no matching exchange position — it's a phantom
-    journal.logAction("CLEANUP", "Phantom trade " + trade.coin + " " + trade.direction.toUpperCase() +
-      " — no matching position on exchange, closing journal entry");
-    await journal.closeTrade(trade.id, trade.entryPrice, 0, "phantom", 0, 0);
-    sendAlert("\uD83D\uDDD1\uFE0F", "PHANTOM CLEANED " + trade.coin, [
-      "Direction: " + trade.direction.toUpperCase(),
-      "Entry: $" + fmtPx(trade.entryPrice),
-      "No matching position found on exchange",
-    ]).catch(function() {});
+    journal.logAction("SYNC-RECOVER", "Recovered " + direction.toUpperCase() + " " + coin + " (entry $" + entryPx.toFixed(2) + ")");
   }
 }
 
@@ -1176,13 +1164,11 @@ export async function botTick(): Promise<{
     return result;
   }
 
-  // ── Step 0: Recover orphaned positions (skip in paper mode) ──
-  if (!config.paperTrading) {
-    try {
-      await recoverOrphanedPositions(hl, config);
-    } catch (e: any) {
-      journal.logAction("ERROR", "Position recovery: " + e.message);
-    }
+  // ── Step 0: Sync journal with exchange (exchange = source of truth) ──
+  try {
+    await syncJournalWithExchange(config);
+  } catch (e: any) {
+    journal.logAction("ERROR", "Journal sync (pre): " + e.message);
   }
 
   // ── Step 0.5 (paper mode): Accrue funding on open paper trades ──
@@ -1219,14 +1205,12 @@ export async function botTick(): Promise<{
     result.errors.push("Scan: " + e.message);
   }
 
-  // ── Step 3: Clean up phantom trades (AFTER scanning — catches positions that
-  //    were opened then immediately liquidated within this tick) ──
-  if (!config.paperTrading) {
-    try {
-      await cleanupPhantomTrades(hl);
-    } catch (e: any) {
-      journal.logAction("ERROR", "Phantom cleanup: " + e.message);
-    }
+  // ── Step 3: Re-sync journal with exchange (catches positions opened then
+  //    immediately liquidated within this tick) ──
+  try {
+    await syncJournalWithExchange(config);
+  } catch (e: any) {
+    journal.logAction("ERROR", "Journal sync (post): " + e.message);
   }
 
   return result;
