@@ -392,6 +392,16 @@ var _livePositionCache: {
 var _livePositionCacheTime = 0;
 var LIVE_POSITION_CACHE_TTL = 30000; // 30 seconds — avoid hammering HL API
 
+// Invalidate all position-related caches (call after opening/closing positions)
+function invalidatePositionCaches() {
+  _livePositionCache = null;
+  _livePositionCacheTime = 0;
+  _accountStatusCache = null;
+  _accountStatusCacheTime = 0;
+  _positionDetailsCache = null;
+  _positionDetailsCacheTime = 0;
+}
+
 async function fetchAllLivePositions(walletAddr: string): Promise<{
   coins: Set<string>;
   positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }>;
@@ -965,6 +975,7 @@ async function closeAllPaperPositions(): Promise<{ closed: string[]; errors: str
           : notional * (-priceChange);
 
         await journal.closeTrade(trade.id, midPrice, 0, "kill_switch", unrealizedPnl, trade.fundingEarned);
+        invalidatePositionCaches();
         closed.push(trade.coin);
         journal.logAction("KILL", "[PAPER] Closed " + trade.coin);
       } catch (e: any) {
@@ -1413,6 +1424,7 @@ async function checkPaperPositions(
 
         var combinedPnl = unrealizedPnl + spotPnl;
         await journal.closeTrade(trade.id, midPrice, fundingMap[trade.coin] || 0, exitReason, combinedPnl, trade.fundingEarned, spotExPx);
+        invalidatePositionCaches();
         result.closed.push(trade.coin + ":" + exitReason + " (paper)");
         journal.logAction("CLOSE", "[PAPER] " + trade.coin + " " + exitReason +
           " PnL: $" + combinedPnl.toFixed(2) + " (perp: $" + unrealizedPnl.toFixed(2) +
@@ -1605,7 +1617,12 @@ async function checkExistingPositions(
             // Builder dex: use raw API to close
             var closeSzi = pos ? parseFloat(pos.szi) : 0;
             var closeSz = Math.abs(closeSzi);
-            var closeIsBuy = closeSzi < 0;
+            // Fallback: if exchange position not found, estimate size from journal trade
+            if (closeSz === 0 && trade.sizeUSD > 0 && midPrice > 0) {
+              closeSz = (trade.sizeUSD * trade.leverage) / midPrice;
+              journal.logAction("WARN", trade.coin + " position not found on exchange — using journal size " + closeSz.toFixed(6));
+            }
+            var closeIsBuy = closeSzi < 0 || (closeSzi === 0 && trade.direction === "short");
             var closeLimitPx = roundPx(closeIsBuy ? midPrice * 1.05 : midPrice * 0.95);
             if (closeSz > 0) {
               await builderDexPlaceOrder({
@@ -1630,7 +1647,11 @@ async function checkExistingPositions(
           try {
             var closeSzi2 = pos ? parseFloat(pos.szi) : 0;
             var closeSz2 = Math.abs(closeSzi2);
-            var closeIsBuy2 = closeSzi2 < 0;
+            // Fallback: estimate from journal if exchange position not found
+            if (closeSz2 === 0 && trade.sizeUSD > 0 && midPrice > 0) {
+              closeSz2 = (trade.sizeUSD * trade.leverage) / midPrice;
+            }
+            var closeIsBuy2 = closeSzi2 < 0 || (closeSzi2 === 0 && trade.direction === "short");
             var closeLimitPx2 = roundPx(closeIsBuy2 ? midPrice * 1.05 : midPrice * 0.95);
 
             if (closeSz2 > 0) {
@@ -1680,6 +1701,7 @@ async function checkExistingPositions(
           }
 
           await journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding, spotExitPx);
+          invalidatePositionCaches(); // Position closed — caches are stale
           result.closed.push(trade.coin + ":" + exitReason);
 
           var totalPnl = unrealizedPnl + cumFunding;
@@ -2014,6 +2036,7 @@ async function scanForOpportunities(
         };
 
         await journal.addTrade(paperTrade);
+        invalidatePositionCaches();
         journal.logAction("OPEN", "[PAPER] " + opp.coin + " " + opp.direction.toUpperCase() +
           " $" + positionUSD + " @ $" + fmtPx(fillPrice) +
           " (APR: " + (opp.fundingAPR * 100).toFixed(0) + "%, SL: $" + fmtPx(simStopPrice) + ")" +
@@ -2153,6 +2176,7 @@ async function scanForOpportunities(
         };
 
         await journal.addTrade(trade);
+        invalidatePositionCaches(); // New position opened — stale caches would miss it
 
         // Place stop-loss order on Hyperliquid (or track in software for builder dex)
         try {
@@ -2244,7 +2268,7 @@ var _accountStatusCache: any = null;
 var _accountStatusCacheTime = 0;
 var ACCOUNT_STATUS_CACHE_TTL = 15000;
 
-export async function getAccountStatus(): Promise<{
+export async function getAccountStatus(forceRefresh?: boolean): Promise<{
   balance: number;
   marginUsed: number;
   positions: Array<{ coin: string; size: string; entryPx: string; unrealizedPnl: string; leverage: number }>;
@@ -2252,9 +2276,14 @@ export async function getAccountStatus(): Promise<{
   error: string;
   debug: Record<string, any>;
 }> {
-  // Return cached if fresh
-  if (_accountStatusCache && Date.now() - _accountStatusCacheTime < ACCOUNT_STATUS_CACHE_TTL) {
+  // Return cached if fresh (unless caller needs fresh data)
+  if (!forceRefresh && _accountStatusCache && Date.now() - _accountStatusCacheTime < ACCOUNT_STATUS_CACHE_TTL) {
     return _accountStatusCache;
+  }
+  // When forcing refresh, also invalidate position cache so fetchAllLivePositions re-queries
+  if (forceRefresh) {
+    _livePositionCache = null;
+    _livePositionCacheTime = 0;
   }
 
   var config = await journal.getConfig();
@@ -2388,9 +2417,9 @@ var _positionDetailsCache: Record<string, { unrealizedPnl: number; cumFunding: n
 var _positionDetailsCacheTime = 0;
 var POSITION_DETAILS_CACHE_TTL = 15000;
 
-export async function getPositionDetails(): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
+export async function getPositionDetails(forceRefresh?: boolean): Promise<Record<string, { unrealizedPnl: number; cumFunding: number; midPrice: number }>> {
   // Return cached if fresh
-  if (_positionDetailsCache && Date.now() - _positionDetailsCacheTime < POSITION_DETAILS_CACHE_TTL) {
+  if (!forceRefresh && _positionDetailsCache && Date.now() - _positionDetailsCacheTime < POSITION_DETAILS_CACHE_TTL) {
     return _positionDetailsCache;
   }
 

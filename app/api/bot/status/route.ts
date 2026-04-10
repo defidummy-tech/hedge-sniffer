@@ -16,9 +16,10 @@ export async function GET() {
     var recentActions = journal.getRecentActions(50);
 
     // Try to get live account data (includes exchange positions)
+    // Always force refresh — dashboard must show current exchange state, not cached
     var account = { balance: 0, marginUsed: 0, positions: [] as any[], walletAddress: "", error: "", debug: {} as any };
     try {
-      account = await getAccountStatus();
+      account = await getAccountStatus(true);
     } catch (e: any) {
       account.error = e.message || "Unknown error";
     }
@@ -71,7 +72,7 @@ export async function GET() {
     // Get live PnL details and funding rates
     var positionDetails: Record<string, any> = {};
     var fundingRatesMap: Record<string, number> = {};
-    try { positionDetails = await getPositionDetails(); } catch (e: any) { /* non-critical */ }
+    try { positionDetails = await getPositionDetails(true); } catch (e: any) { /* non-critical */ }
     try { fundingRatesMap = await getFundingRates(); } catch (e: any) { /* non-critical */ }
 
     // Build positions from exchange data
