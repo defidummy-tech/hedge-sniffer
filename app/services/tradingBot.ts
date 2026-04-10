@@ -387,6 +387,7 @@ async function fetchBuilderDexFunding(coins: string[]): Promise<{ fundingMap: Re
 var _livePositionCache: {
   coins: Set<string>;
   positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }>;
+  builderDexQueriesOk: boolean; // true if ALL builder dex queries succeeded
 } | null = null;
 var _livePositionCacheTime = 0;
 var LIVE_POSITION_CACHE_TTL = 30000; // 30 seconds — avoid hammering HL API
@@ -394,6 +395,7 @@ var LIVE_POSITION_CACHE_TTL = 30000; // 30 seconds — avoid hammering HL API
 async function fetchAllLivePositions(walletAddr: string): Promise<{
   coins: Set<string>;
   positions: Array<{ coin: string; szi: string; entryPx: string; unrealizedPnl: string; leverage: number; cumFunding: string }>;
+  builderDexQueriesOk: boolean;
 }> {
   // Return cached result if fresh enough
   if (_livePositionCache && Date.now() - _livePositionCacheTime < LIVE_POSITION_CACHE_TTL) {
@@ -428,6 +430,7 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
   // 2) Builder dex positions — query ALL known dexes (needed for recovery after redeploy)
   //    The 30s cache prevents excessive API calls on repeated dashboard refreshes.
   var KNOWN_BUILDER_DEXES = ["xyz", "flx", "vntl", "hyna", "km", "cash", "para"];
+  var builderDexFailCount = 0;
   for (var di = 0; di < KNOWN_BUILDER_DEXES.length; di++) {
     var dexName = KNOWN_BUILDER_DEXES[di];
     try {
@@ -465,9 +468,12 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
         });
       }
     } catch (e: any) {
+      builderDexFailCount++;
       journal.logAction("WARN", "Builder dex " + dexName + " position query failed: " + e.message);
     }
   }
+
+  var builderDexQueriesOk = builderDexFailCount === 0;
 
   // Only log when position count changes to avoid log spam
   var prevCount = _livePositionCache ? _livePositionCache.positions.length : -1;
@@ -477,7 +483,7 @@ async function fetchAllLivePositions(walletAddr: string): Promise<{
   }
 
   // Cache the result
-  var result = { coins: coins, positions: positions };
+  var result = { coins: coins, positions: positions, builderDexQueriesOk: builderDexQueriesOk };
   _livePositionCache = result;
   _livePositionCacheTime = Date.now();
 
@@ -1061,12 +1067,11 @@ async function cleanupPhantomTrades(hl: Hyperliquid): Promise<void> {
   for (var trade of openTrades) {
     if (liveCoins.has(trade.coin)) continue; // position exists on exchange — OK
 
-    // Builder dex trades: NEVER phantom-close them.
-    // The clearinghouseState API may return coin names that don't match our journal format,
-    // so we can't reliably verify builder dex positions. Instead, skip them entirely.
+    // Builder dex trades: only phantom-close if ALL builder dex queries succeeded.
+    // If any query failed, we can't be sure the position doesn't exist — skip to be safe.
     var isBuilderDex = trade.coin.indexOf(":") !== -1;
-    if (isBuilderDex) {
-      journal.logAction("PHANTOM-SKIP", trade.coin + " is builder dex — skipping phantom cleanup (API coin name may not match journal)");
+    if (isBuilderDex && !live.builderDexQueriesOk) {
+      journal.logAction("PHANTOM-SKIP", trade.coin + " — builder dex queries had failures, skipping phantom cleanup to be safe");
       continue;
     }
 
