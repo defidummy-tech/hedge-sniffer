@@ -1352,8 +1352,10 @@ export async function botTick(): Promise<{
   }
 
   // ── Step 1: Check existing positions & close if needed ──
+  // Track coins closed this tick to prevent same-tick re-entry
+  var coinsClosedThisTick: Set<string> = new Set();
   try {
-    await checkExistingPositions(hl, config, result);
+    await checkExistingPositions(hl, config, result, coinsClosedThisTick);
   } catch (e: any) {
     journal.logAction("ERROR", "Position check: " + e.message);
     result.errors.push("Position check: " + e.message);
@@ -1370,7 +1372,7 @@ export async function botTick(): Promise<{
   // Re-read config in case blacklist was updated
   config = await journal.getConfig();
   try {
-    await scanForOpportunities(hl, config, result);
+    await scanForOpportunities(hl, config, result, coinsClosedThisTick);
   } catch (e: any) {
     journal.logAction("ERROR", "Scan: " + e.message);
     result.errors.push("Scan: " + e.message);
@@ -1614,7 +1616,8 @@ async function checkPaperPositions(
 async function checkExistingPositions(
   hl: Hyperliquid,
   config: BotConfig,
-  result: { closed: string[]; errors: string[] }
+  result: { closed: string[]; errors: string[] },
+  coinsClosedThisTick?: Set<string>
 ): Promise<void> {
   // Paper mode: use journal + mainnet prices instead of getClearinghouseState
   if (config.paperTrading) {
@@ -1808,7 +1811,7 @@ async function checkExistingPositions(
             var mainCloseLimitPx = roundPx(mainCloseIsBuy ? midPrice * 1.05 : midPrice * 0.95);
             if (mainCloseSz > 0) {
               var mainCloseIdx = await getAssetIndex(trade.coin);
-              await rawPlaceOrder({
+              var closeResult = await rawPlaceOrder({
                 coin: trade.coin,
                 assetIndex: mainCloseIdx,
                 isBuy: mainCloseIsBuy,
@@ -1817,8 +1820,19 @@ async function checkExistingPositions(
                 reduceOnly: true,
                 szDecimals: 4,
               });
-              closedOk = true;
-              journal.logAction("CLOSE", trade.coin + " closed via raw API");
+              // Validate the close actually filled
+              var closeFilled = false;
+              if (closeResult && closeResult.response && closeResult.response.data && closeResult.response.data.statuses) {
+                var cs = closeResult.response.data.statuses[0];
+                if (cs && (cs.filled || cs.resting)) closeFilled = true;
+                if (cs && cs.error) journal.logAction("WARN", "Close " + trade.coin + " order error: " + cs.error);
+              }
+              if (closeFilled) {
+                closedOk = true;
+                journal.logAction("CLOSE", trade.coin + " closed via raw API");
+              } else {
+                journal.logAction("WARN", "Close " + trade.coin + " order not filled — position may still be open");
+              }
             }
           }
         } catch (e: any) {
@@ -1874,6 +1888,7 @@ async function checkExistingPositions(
 
           await journal.closeTrade(trade.id, midPrice, currentAPR, exitReason, unrealizedPnl, cumFunding, spotExitPx);
           invalidatePositionCaches(); // Position closed — caches are stale
+          if (coinsClosedThisTick) coinsClosedThisTick.add(trade.coin);
           result.closed.push(trade.coin + ":" + exitReason);
 
           var totalPnl = unrealizedPnl + cumFunding;
@@ -1899,7 +1914,8 @@ async function checkExistingPositions(
 async function scanForOpportunities(
   hl: Hyperliquid,
   config: BotConfig,
-  result: { scanned: number; opened: string[]; skipped: string[]; errors: string[] }
+  result: { scanned: number; opened: string[]; skipped: string[]; errors: string[] },
+  coinsClosedThisTick?: Set<string>
 ): Promise<void> {
   var isPaper = config.paperTrading;
   var openCount = (await journal.getOpenTrades(isPaper ? true : undefined)).length;
@@ -1998,6 +2014,13 @@ async function scanForOpportunities(
     // Skip if already have position (filter by current mode)
     if (await journal.isAlreadyOpen(opp.coin, isPaper ? true : undefined)) {
       result.skipped.push(opp.coin + ":already_open");
+      continue;
+    }
+
+    // Skip coins that were closed earlier in this same tick (prevent rapid churn)
+    if (coinsClosedThisTick && coinsClosedThisTick.has(opp.coin)) {
+      result.skipped.push(opp.coin + ":closed_this_tick");
+      journal.logAction("COOLDOWN", opp.coin + " skipped — closed earlier this tick");
       continue;
     }
 
