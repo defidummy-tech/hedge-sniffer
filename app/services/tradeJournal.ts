@@ -399,6 +399,21 @@ export async function updateTradePnl(tradeId: string, unrealizedPnl: number): Pr
   saveAndSync(TRADES_FILE, "hedge:trades", trades);
 }
 
+// Delete trades by ID (for cleaning up phantom/duplicate entries)
+export async function deleteTrades(tradeIds: string[]): Promise<number> {
+  await ensureInit();
+  var trades = await getAllTrades();
+  var before = trades.length;
+  var idSet = new Set(tradeIds);
+  trades = trades.filter(function(t) { return !idSet.has(t.id); });
+  var removed = before - trades.length;
+  if (removed > 0) {
+    saveAndSync(TRADES_FILE, "hedge:trades", trades);
+    logAction("CLEANUP", "Deleted " + removed + " phantom trade(s)");
+  }
+  return removed;
+}
+
 export async function updateTradeStop(tradeId: string, newStop: number): Promise<void> {
   await ensureInit();
   var trades = await getAllTrades();
