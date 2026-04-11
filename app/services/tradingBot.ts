@@ -241,7 +241,13 @@ async function rawPlaceOrder(opts: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  var json = await res.json();
+  var resText = await res.text();
+  var json: any;
+  try {
+    json = JSON.parse(resText);
+  } catch (e) {
+    throw new Error("Order failed (" + opts.coin + "): " + resText.slice(0, 200));
+  }
   if (!res.ok) throw new Error("Order failed (" + opts.coin + "): " + JSON.stringify(json));
   return json;
 }
@@ -270,7 +276,13 @@ async function rawUpdateLeverage(coin: string, assetIndex: number, leverage: num
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  var json = await res.json();
+  var levResText = await res.text();
+  var json: any;
+  try {
+    json = JSON.parse(levResText);
+  } catch (e) {
+    throw new Error("Leverage update failed (" + coin + "): " + levResText.slice(0, 200));
+  }
   journal.logAction("LEV", coin + " leverage response (HTTP " + res.status + "): " + JSON.stringify(json).slice(0, 300));
 
   if (!json || json.status === "err") {
