@@ -117,7 +117,7 @@ function defaultConfig(): BotConfig {
     fundingLockMinutes: parseFloat(process.env.BOT_FUNDING_LOCK_MINUTES || "10"),
     slCooldownHours: parseFloat(process.env.BOT_SL_COOLDOWN_HOURS || "48"),
     takeProfitPct: parseFloat(process.env.BOT_TAKE_PROFIT_PCT || "0"),
-    trailingStopPct: parseFloat(process.env.BOT_TRAILING_STOP_PCT || "8"),
+    trailingStopPct: parseFloat(process.env.BOT_TRAILING_STOP_PCT || "5"),
     minVolume: parseFloat(process.env.BOT_MIN_VOLUME || "0"),
     minOI: parseFloat(process.env.BOT_MIN_OI || "0"),
     maxDropPct: parseFloat(process.env.BOT_MAX_DROP_PCT || "3.5"),
@@ -204,11 +204,7 @@ function mergeWithDefaults(saved: any): BotConfig {
     console.log("[journal] Migrating entryAPR from " + merged.entryAPR + " to 1.0");
     merged.entryAPR = 1.0;
   }
-  // v2: trailing stop <8% was too tight (capped winners at +$2-6 instead of letting $25+ runners develop)
-  if (saved && saved.trailingStopPct != null && saved.trailingStopPct < 8) {
-    console.log("[journal] Migrating trailingStopPct from " + merged.trailingStopPct + " to 8");
-    merged.trailingStopPct = 8;
-  }
+  // v2: (removed) — backtest optimization now sets trailingStopPct=5 as optimal
   // v3: exitAPR of 1.0 too high, backtest shows 0.5 is optimal
   if (saved && saved.exitAPR >= 1.0) {
     console.log("[journal] Migrating exitAPR from " + merged.exitAPR + " to " + defaults.exitAPR);
