@@ -341,7 +341,7 @@ async function fetchBuilderDexFunding(coins: string[]): Promise<{ fundingMap: Re
   var fundingMap: Record<string, number> = {};
   var mids: Record<string, string> = {};
 
-  // Group by dex prefix
+  // Group by dex prefix (extract first segment from "xyz:xyz:CL" → "xyz")
   var dexGroups: Record<string, string[]> = {};
   for (var c of coins) {
     var colonIdx = c.indexOf(":");
@@ -369,13 +369,29 @@ async function fetchBuilderDexFunding(coins: string[]): Promise<{ fundingMap: Re
       data.meta.universe.forEach(function(u: any, i: number) {
         var ctx = data.ctxs[i];
         if (ctx && ctx.funding) {
-          fundingMap[data.dexName + ":" + u.name] = parseFloat(ctx.funding) * 8760;
+          // API returns coin names like "CL" or "xyz:CL" — normalize to full format "xyz:xyz:CL"
+          // to match trade.coin which uses "dex:dex:coin" format from fetchAllLivePositions
+          var apiCoin = u.name; // e.g., "CL" or "xyz:CL"
+          var fullKey: string;
+          if (apiCoin.indexOf(":") !== -1) {
+            fullKey = data.dexName + ":" + apiCoin; // "xyz" + ":" + "xyz:CL" = "xyz:xyz:CL"
+          } else {
+            fullKey = data.dexName + ":" + data.dexName + ":" + apiCoin; // "xyz:xyz:CL"
+          }
+          fundingMap[fullKey] = parseFloat(ctx.funding) * 8760;
         }
       });
     }
     if (data.mids) {
       for (var coin in data.mids) {
-        mids[data.dexName + ":" + coin] = data.mids[coin];
+        // Same normalization for mid prices
+        var midFullKey: string;
+        if (coin.indexOf(":") !== -1) {
+          midFullKey = data.dexName + ":" + coin;
+        } else {
+          midFullKey = data.dexName + ":" + data.dexName + ":" + coin;
+        }
+        mids[midFullKey] = data.mids[coin];
       }
     }
   }
@@ -1032,6 +1048,16 @@ async function syncJournalWithExchange(config: BotConfig): Promise<void> {
   for (var trade of openTrades) {
     if (liveCoinsSet.has(trade.coin)) continue; // position exists on exchange — OK
 
+    // Don't phantom-close trades that were recently recovered (< 30 min ago)
+    // This prevents churn where a recovered trade gets phantom-closed before
+    // the builder dex query catches up on the next sync
+    var tradeAge = Date.now() - trade.entryTime;
+    if (tradeAge < 30 * 60 * 1000) {
+      journal.logAction("SYNC-SKIP", trade.coin + " not on exchange but recently recovered (" +
+        Math.round(tradeAge / 60000) + "min ago) — skipping phantom close");
+      continue;
+    }
+
     journal.logAction("SYNC-CLOSE", trade.coin + " " + trade.direction.toUpperCase() +
       " — not found on exchange, closing journal entry");
     await journal.closeTrade(trade.id, trade.entryPrice, 0, "phantom", 0, 0);
@@ -1056,6 +1082,28 @@ async function syncJournalWithExchange(config: BotConfig): Promise<void> {
   var updatedOpenTrades = await journal.getOpenTrades(false);
   var updatedKnownCoins = new Set(updatedOpenTrades.map(function(t) { return t.coin; }));
 
+  // Fetch current funding rates so recovered trades get accurate entryFundingAPR
+  var recoveryFundingMap: Record<string, number> = {};
+  try {
+    var recoveryMeta = await hlInfoPost({ type: "metaAndAssetCtxs" });
+    recoveryMeta[0].universe.forEach(function(u: any, i: number) {
+      var ctx = recoveryMeta[1][i];
+      if (ctx && ctx.funding) {
+        recoveryFundingMap[u.name] = parseFloat(ctx.funding) * 8760;
+      }
+    });
+    // Also fetch builder dex funding for orphaned builder dex positions
+    var orphanBdCoins = live.positions
+      .filter(function(p) { return p.coin.indexOf(":") !== -1 && !updatedKnownCoins.has(p.coin); })
+      .map(function(p) { return p.coin; });
+    if (orphanBdCoins.length > 0) {
+      var bdFunding = await fetchBuilderDexFunding(orphanBdCoins);
+      for (var bfk in bdFunding.fundingMap) recoveryFundingMap[bfk] = bdFunding.fundingMap[bfk];
+    }
+  } catch (e: any) {
+    journal.logAction("WARN", "Could not fetch funding rates for recovery: " + e.message);
+  }
+
   for (var pos of live.positions) {
     var coin = pos.coin;
     if (updatedKnownCoins.has(coin)) continue; // already tracked
@@ -1065,6 +1113,9 @@ async function syncJournalWithExchange(config: BotConfig): Promise<void> {
     var entryPx = parseFloat(pos.entryPx);
     var leverage = pos.leverage || config.leverage;
 
+    // Use current funding rate as entryFundingAPR so exit logic works correctly
+    var currentFundingAPR = Math.abs(recoveryFundingMap[coin] || 0);
+
     var recoveredTrade: BotTrade = {
       id: genId(),
       coin: coin,
@@ -1073,7 +1124,7 @@ async function syncJournalWithExchange(config: BotConfig): Promise<void> {
       leverage: leverage,
       entryPrice: entryPx,
       entryTime: Date.now() - 3600000, // approximate
-      entryFundingAPR: 0,
+      entryFundingAPR: currentFundingAPR,
       exitPrice: null,
       exitTime: null,
       exitFundingAPR: null,
@@ -1088,7 +1139,8 @@ async function syncJournalWithExchange(config: BotConfig): Promise<void> {
     };
 
     await journal.addTrade(recoveredTrade);
-    journal.logAction("SYNC-RECOVER", "Recovered " + direction.toUpperCase() + " " + coin + " (entry $" + entryPx.toFixed(2) + ")");
+    journal.logAction("SYNC-RECOVER", "Recovered " + direction.toUpperCase() + " " + coin +
+      " (entry $" + entryPx.toFixed(2) + ", funding APR " + (currentFundingAPR * 100).toFixed(0) + "%)");
   }
 }
 
