@@ -138,8 +138,14 @@ async function getBuilderDexAssetIndex(coin: string): Promise<number> {
           var dexMeta = await hlInfoPost({ type: "meta", dex: dex.name });
           if (dexMeta && dexMeta.universe) {
             dexMeta.universe.forEach(function(u: any, assetIdx: number) {
-              // u.name is like "xyz:CL", full coin key is "xyz:xyz:CL"
-              var fullKey = dex.name + ":" + u.name;
+              // u.name may be "CL" or "xyz:CL" — normalize to "xyz:xyz:CL"
+              var apiCoin = u.name;
+              var fullKey: string;
+              if (apiCoin.indexOf(":") !== -1) {
+                fullKey = dex.name + ":" + apiCoin;
+              } else {
+                fullKey = dex.name + ":" + dex.name + ":" + apiCoin;
+              }
               builderDexIndexCache![fullKey] = 100000 + dexIdx * 10000 + assetIdx;
             });
           }
@@ -310,7 +316,14 @@ async function fetchBuilderDexOpportunities(): Promise<Array<{
           var rate = parseFloat(ctx.funding || "0");
           var mid = parseFloat(ctx.midPx || ctx.markPx || "0");
           if (mid <= 0) return;
-          var fullCoin = dexName + ":" + u.name;
+          // Normalize: u.name may be "CL" or "xyz:CL" — always produce "xyz:xyz:CL"
+          var apiCoin = u.name;
+          var fullCoin: string;
+          if (apiCoin.indexOf(":") !== -1) {
+            fullCoin = dexName + ":" + apiCoin; // "xyz" + ":" + "xyz:CL"
+          } else {
+            fullCoin = dexName + ":" + dexName + ":" + apiCoin; // "xyz:xyz:CL"
+          }
           results.push({
             coin: fullCoin,
             dex: dexName,
@@ -652,10 +665,20 @@ async function getRecentVolatility(coin: string): Promise<number> {
   try {
     var now = Date.now();
     var fourHoursAgo = now - 4 * 3600000;
-    var candleData = await hlInfoPost({
+    // Parse builder dex format: "xyz:xyz:CL" → dex="xyz", apiCoin="xyz:CL"
+    var apiCoin = coin;
+    var dexParam: string | undefined;
+    var colonIdx = coin.indexOf(":");
+    if (colonIdx !== -1) {
+      dexParam = coin.substring(0, colonIdx);
+      apiCoin = coin.substring(colonIdx + 1);
+    }
+    var candleBody: any = {
       type: "candleSnapshot",
-      req: { coin: coin, interval: "1h", startTime: fourHoursAgo, endTime: now },
-    });
+      req: { coin: apiCoin, interval: "1h", startTime: fourHoursAgo, endTime: now },
+    };
+    if (dexParam) candleBody.dex = dexParam;
+    var candleData = await hlInfoPost(candleBody);
     if (!Array.isArray(candleData) || candleData.length === 0) return 0;
     var totalRange = 0;
     var avgPrice = 0;
@@ -680,15 +703,20 @@ async function getRecentPriceDrop(coin: string, currentPrice: number): Promise<n
     // Fetch 4h candles for the last 4 hours
     var now = Date.now();
     var fourHoursAgo = now - 4 * 3600000;
-    var candleData = await hlInfoPost({
+    // Parse builder dex format: "xyz:xyz:CL" → dex="xyz", apiCoin="xyz:CL"
+    var apiCoin = coin;
+    var dexParam: string | undefined;
+    var colonIdx = coin.indexOf(":");
+    if (colonIdx !== -1) {
+      dexParam = coin.substring(0, colonIdx);
+      apiCoin = coin.substring(colonIdx + 1);
+    }
+    var candleBody: any = {
       type: "candleSnapshot",
-      req: {
-        coin: coin,
-        interval: "1h",
-        startTime: fourHoursAgo,
-        endTime: now,
-      },
-    });
+      req: { coin: apiCoin, interval: "1h", startTime: fourHoursAgo, endTime: now },
+    };
+    if (dexParam) candleBody.dex = dexParam;
+    var candleData = await hlInfoPost(candleBody);
 
     if (!Array.isArray(candleData) || candleData.length === 0) return 0;
 
@@ -715,10 +743,20 @@ async function getRecentPriceRise(coin: string, currentPrice: number): Promise<n
   try {
     var now = Date.now();
     var fourHoursAgo = now - 4 * 3600000;
-    var candleData = await hlInfoPost({
+    // Parse builder dex format: "xyz:xyz:CL" → dex="xyz", apiCoin="xyz:CL"
+    var apiCoin = coin;
+    var dexParam: string | undefined;
+    var colonIdx = coin.indexOf(":");
+    if (colonIdx !== -1) {
+      dexParam = coin.substring(0, colonIdx);
+      apiCoin = coin.substring(colonIdx + 1);
+    }
+    var candleBody: any = {
       type: "candleSnapshot",
-      req: { coin: coin, interval: "1h", startTime: fourHoursAgo, endTime: now },
-    });
+      req: { coin: apiCoin, interval: "1h", startTime: fourHoursAgo, endTime: now },
+    };
+    if (dexParam) candleBody.dex = dexParam;
+    var candleData = await hlInfoPost(candleBody);
     if (!Array.isArray(candleData) || candleData.length === 0) return 0;
     var lowPrice = Infinity;
     for (var c of candleData) {
@@ -1284,7 +1322,7 @@ async function accruePaperFunding(hl: Hyperliquid): Promise<void> {
   var openTrades = await journal.getOpenTrades(true); // paper only
   if (openTrades.length === 0) return;
 
-  var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+  var metaCtx = await hlInfoPost({ type: "metaAndAssetCtxs" });
   var meta = metaCtx[0];
   var assetCtxs = metaCtx[1];
 
@@ -1341,8 +1379,8 @@ async function checkPaperPositions(
   var openTrades = await journal.getOpenTrades(true); // paper only
   if (openTrades.length === 0) return;
 
-  var mids = await hl.info.getAllMids();
-  var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+  var mids = await hlInfoPost({ type: "allMids" });
+  var metaCtx = await hlInfoPost({ type: "metaAndAssetCtxs" });
   var meta = metaCtx[0];
   var assetCtxs = metaCtx[1];
 
@@ -1613,10 +1651,11 @@ async function checkExistingPositions(
       var fundingFavorsUs = (trade.direction === "short" && rawAPR > 0) || // we're SHORT & longs pay us
                             (trade.direction === "long" && rawAPR < 0);   // we're LONG & shorts pay us
 
-      // Check exit conditions — include trailing stop price check for real mode
+      // Check exit conditions — stop price check works even if trailing stop is disabled
+      // (builder dex positions use software stop-losses since exchange triggers aren't supported)
       var lossPct = Math.abs(unrealizedPnl) / trade.sizeUSD * 100;
       var trailingStopHit = false;
-      if (trade.stopPrice != null && config.trailingStopPct > 0) {
+      if (trade.stopPrice != null) {
         trailingStopHit = trade.direction === "long"
           ? midPrice <= trade.stopPrice
           : midPrice >= trade.stopPrice;
@@ -1788,8 +1827,8 @@ async function scanForOpportunities(
     return;
   }
 
-  // Fetch all funding rates
-  var metaCtx = await hl.info.perpetuals.getMetaAndAssetCtxs();
+  // Fetch all funding rates (raw API, not SDK — avoids CORS and works in all environments)
+  var metaCtx = await hlInfoPost({ type: "metaAndAssetCtxs" });
   var meta = metaCtx[0];
   var assetCtxs = metaCtx[1];
 
@@ -1805,7 +1844,7 @@ async function scanForOpportunities(
     openInterest: number;
   }> = [];
 
-  meta.universe.forEach(function(u, i) {
+  meta.universe.forEach(function(u: any, i: number) {
     var ctx = assetCtxs[i];
     if (!ctx || !ctx.funding) return;
 

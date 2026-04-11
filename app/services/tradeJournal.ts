@@ -368,8 +368,9 @@ export async function reopenTrade(tradeId: string): Promise<boolean> {
   trade.exitFundingAPR = null;
   trade.exitReason = null;
   trade.pnl = 0;
-  trade.fundingEarned = 0;
-  trade.totalReturn = 0;
+  // Preserve fundingEarned — don't wipe accrued funding data on reopen
+  // totalReturn = pnl + fundingEarned, recalculate from preserved funding
+  trade.totalReturn = trade.fundingEarned || 0;
   trade.status = "open";
   saveAndSync(TRADES_FILE, "hedge:trades", trades);
   logAction("REOPEN", trade.coin + " re-opened (was incorrectly closed)");
